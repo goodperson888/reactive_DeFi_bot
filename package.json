@@ -1,0 +1,13 @@
+{
+  "name": "reactive",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "hardhat test"
+  },
+  "devDependencies": {
+    "hardhat": "^2.19.0",
+    "@nomicfoundation/hardhat-toolbox": "^3.0.0",
+    "dotenv": "^16.3.1"
+  }
+}
