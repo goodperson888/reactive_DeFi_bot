@@ -6,6 +6,7 @@
  */
 
 import hre from "hardhat";
+import { pathToFileURL } from "url";
 
 // 测试结果统计
 let passed = 0;
@@ -200,4 +201,9 @@ async function main() {
   }
 }
 
-main();
+const isDirectExecution =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectExecution) {
+  main();
+}

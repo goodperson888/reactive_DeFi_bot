@@ -1,60 +1,71 @@
-import "dotenv/config";
-import "@nomicfoundation/hardhat-toolbox";
-import { CHAINS } from "./config/index.js";
+﻿require("@nomicfoundation/hardhat-toolbox");
+require("dotenv").config();
+require("hardhat-deploy");
 
-// 只在私钥是有效的 0x 开头 hex 字符串时才使用
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const accounts =
-  PRIVATE_KEY && /^0x[0-9a-fA-F]{64}$/.test(PRIVATE_KEY)
-    ? [PRIVATE_KEY]
-    : [];
+// 兼容两套环境变量命名，保留当前网络命名不变
+const sepolia_url = process.env.SEPOLIA_URL || process.env.SEPOLIA_RPC_URL || "";
+const base_sepolia_url = process.env.BASE_SEPOLIA_URL || process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org";
+const lasna_url = process.env.LASNA_URL || process.env.REACTIVE_RPC_URL || "https://lasna-rpc.rnk.dev/";
+const my_key1 = process.env.WALLET_KEY1 || process.env.PRIVATE_KEY || "";
+const my_key2 = process.env.WALLET_KEY2 || "";
+const MY_API_KEY = process.env.API_KEY || process.env.ETHERSCAN_API_KEY || "";
+const accounts = [my_key1, my_key2].filter(Boolean);
 
 /** @type import('hardhat/config').HardhatUserConfig */
-export default {
-  solidity: {
-    version: "0.8.24",
-    settings: {
-      optimizer: { enabled: true, runs: 200 },
-    },
-  },
+
+module.exports = {
+  solidity: "0.8.28",
+
+  defaultNetwork: "hardhat",
 
   networks: {
-    hardhat: {},
-    localhost: { url: "http://127.0.0.1:8545" },
-
     sepolia: {
-      url: CHAINS.origin.rpc || "https://rpc.sepolia.org",
-      chainId: CHAINS.origin.chainId,
+      url: sepolia_url,
+      accounts,
+      chainId: 11155111
+    },
+
+    base_sepolia: {
+      url: base_sepolia_url,
+      chainId: 84532,
       accounts,
     },
 
-    "base-sepolia": {
-      url: CHAINS.destination.rpc || "https://sepolia.base.org",
-      chainId: CHAINS.destination.chainId,
+      "cancun": {
+    url: "https://evmrpc-testnet.0g.ai",
+    chainId: 16602,
+    accounts,
+    gas: "auto",
+    gasPrice: "auto",
+  },
+     lasna: {
+    url: lasna_url,
+    accounts,
+    chainId: 5318007,
+    gas: "auto",
+    gasPrice: "auto",
+  },
+     // BNB Smart Chain Testnet
+    bscTestnet: {
+      url: "https://data-seed-prebsc-1-s1.bnbchain.org:8545",
+      chainId: 97,
       accounts,
+      gas: "auto",
     },
 
-    reactive: {
-      url: CHAINS.reactive.rpc || "https://kopli-rpc.rkt.ink",
-      chainId: CHAINS.reactive.chainId,
-      accounts,
-    },
+
   },
 
   etherscan: {
-    apiKey: {
-      sepolia: process.env.ETHERSCAN_API_KEY || "",
-      "base-sepolia": process.env.BASESCAN_API_KEY || "",
-    },
-    customChains: [
-      {
-        network: "base-sepolia",
-        chainId: 84532,
-        urls: {
-          apiURL: "https://api-sepolia.basescan.org/api",
-          browserURL: "https://sepolia.basescan.org",
-        },
-      },
-    ],
+    apiKey: MY_API_KEY
   },
+
+  namedAccounts: {
+    firstAccount: {
+      default: 0
+    },
+    secondAccount: {
+      default: 1
+    },
+  }
 };

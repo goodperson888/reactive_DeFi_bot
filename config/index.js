@@ -11,17 +11,17 @@ export const CHAINS = {
   origin: {
     name: "sepolia",
     chainId: 11155111,
-    rpc: process.env.SEPOLIA_RPC_URL,
+    rpc: process.env.SEPOLIA_RPC_URL || process.env.SEPOLIA_URL || "https://rpc.sepolia.org",
   },
   destination: {
     name: "base-sepolia",
     chainId: 84532,
-    rpc: process.env.BASE_SEPOLIA_RPC_URL,
+    rpc: process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_SEPOLIA_URL || "https://sepolia.base.org",
   },
   reactive: {
-    name: "reactive-testnet",
-    chainId: 5318008,
-    rpc: process.env.REACTIVE_RPC_URL || "https://kopli-rpc.rkt.ink",
+    name: "lasna",
+    chainId: 5318007,
+    rpc: process.env.REACTIVE_RPC_URL || process.env.LASNA_URL || "https://lasna-rpc.rnk.dev/",
   },
 };
 

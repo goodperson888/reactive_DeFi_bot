@@ -1,71 +1,68 @@
 /**
- * 演示脚本 - 模拟套利场景
+ * Arbitrage demo script.
  *
- * 流程：
- * 1. 在 Origin 链和 Destination 链的 MockDEX 设置不同价格
- * 2. 在 Origin 链执行 Swap，触发价格变化事件
- * 3. RC 监听到价差 > 1.5%，触发套利
- * 4. Destination 链执行套利交易
- *
- * 使用方式：
- * npx hardhat run scripts/tasks/demo-arbitrage.js --network sepolia
+ * It talks to origin and destination chains through dedicated RPC providers
+ * instead of relying on `hre.changeNetwork()`.
  */
 
 import hre from "hardhat";
-import { CONTRACTS } from "../../config/index.js";
+import { ethers } from "ethers";
+import { CONTRACTS, CHAINS } from "../../config/index.js";
+
+const DEMO_KEY = process.env.WALLET_KEY1 || process.env.PRIVATE_KEY || "";
+
+function requireValue(label, value) {
+  if (!value) {
+    throw new Error(`Missing required config: ${label}`);
+  }
+
+  return value;
+}
+
+function getWallet(label, rpcUrl) {
+  requireValue("WALLET_KEY1 or PRIVATE_KEY", DEMO_KEY);
+  requireValue(`${label} RPC`, rpcUrl);
+  return new ethers.Wallet(DEMO_KEY, new ethers.JsonRpcProvider(rpcUrl));
+}
+
+async function getMockDex(address, signer) {
+  requireValue("MockDEX address", address);
+  const artifact = await hre.artifacts.readArtifact("MockDEX");
+  return new ethers.Contract(address, artifact.abi, signer);
+}
 
 async function main() {
-  console.log("\n🎬 套利演示脚本\n");
+  console.log("\nArbitrage demo\n");
   console.log("=".repeat(60));
 
-  const [signer] = await hre.ethers.getSigners();
-  console.log(`\n使用账户: ${signer.address}\n`);
+  const originSigner = getWallet("Sepolia", CHAINS.origin.rpc);
+  const destinationSigner = getWallet("Base Sepolia", CHAINS.destination.rpc);
+  console.log(`\nUsing account: ${originSigner.address}\n`);
 
-  // ─── 步骤 1: 设置价差 ──────────────────────────────────────────────────────
+  const mockDexA = await getMockDex(CONTRACTS.origin.mockDexA, originSigner);
+  const mockDexB = await getMockDex(CONTRACTS.destination.mockDexB, destinationSigner);
 
-  console.log("📍 步骤 1: 在两条链上设置不同价格");
+  console.log("Step 1: Set price difference across chains");
 
-  // Origin 链 DEX
-  await hre.changeNetwork("sepolia");
-  const mockDexA = await hre.ethers.getContractAt(
-    "MockDEX",
-    CONTRACTS.origin.mockDexA
-  );
-
-  console.log("  → Origin 链 DEX 设置价格: 3000 USDC/ETH");
+  console.log("  -> Origin DEX price: 3000 USDC/ETH");
   await (await mockDexA.setPrice(3000e6)).wait();
 
-  // Destination 链 DEX
-  await hre.changeNetwork("base-sepolia");
-  const mockDexB = await hre.ethers.getContractAt(
-    "MockDEX",
-    CONTRACTS.destination.mockDexB
-  );
-
-  console.log("  → Destination 链 DEX 设置价格: 3050 USDC/ETH");
+  console.log("  -> Destination DEX price: 3050 USDC/ETH");
   await (await mockDexB.setPrice(3050e6)).wait();
 
   const priceA = await mockDexA.getPrice();
   const priceB = await mockDexB.getPrice();
   const spread = ((Number(priceB) - Number(priceA)) / Number(priceA)) * 100;
+  console.log(`  Spread: ${spread.toFixed(2)}%`);
 
-  console.log(`  ✓ 价差: ${spread.toFixed(2)}%`);
-
-  // ─── 步骤 2: 在 Origin 链执行 Swap ────────────────────────────────────────
-
-  console.log("\n📍 步骤 2: 在 Origin 链执行 Swap（触发事件）");
-
-  await hre.changeNetwork("sepolia");
-
+  console.log("\nStep 2: Execute origin-chain swap");
   const swapTx = await mockDexA.swapETHForUSDC({
-    value: hre.ethers.parseEther("0.1"),
+    value: ethers.parseEther("0.01"),
   });
   const receipt = await swapTx.wait();
-  console.log("  ✓ Swap 完成");
+  console.log("  Swap complete");
 
-  // ─── 步骤 3: 检查事件 ──────────────────────────────────────────────────────
-
-  console.log("\n📍 步骤 3: 检查 Swap 事件");
+  console.log("\nStep 3: Parse Swap event");
   const events = receipt.logs
     .map((log) => {
       try {
@@ -74,29 +71,24 @@ async function main() {
         return null;
       }
     })
-    .filter((e) => e && e.name === "Swap");
+    .filter((event) => event && event.name === "Swap");
 
   if (events.length > 0) {
     const event = events[0];
-    console.log("  ✓ 事件已触发:");
-    console.log(`    用户: ${event.args.user}`);
-    console.log(`    输入: ${hre.ethers.formatEther(event.args.amountIn)} ETH`);
-    console.log(`    输出: ${Number(event.args.amountOut) / 1e6} USDC`);
-    console.log(`    价格: ${Number(event.args.newPrice) / 1e6} USDC/ETH`);
+    console.log("  Swap event detected");
+    console.log(`    User: ${event.args.user}`);
+    console.log(`    In: ${ethers.formatEther(event.args.amountIn)} ETH`);
+    console.log(`    Out: ${Number(event.args.amountOut) / 1e6} USDC`);
+    console.log(`    Price: ${Number(event.args.newPrice) / 1e6} USDC/ETH`);
   }
 
-  // ─── 总结 ──────────────────────────────────────────────────────────────────
-
   console.log("\n" + "=".repeat(60));
-  console.log("\n✅ 演示完成！\n");
-  console.log("💡 下一步：");
-  console.log("  1. RC Controller 监听到 Swap 事件");
-  console.log("  2. 检测到价差 > 1.5%，触发套利");
-  console.log("  3. 跨链调用 Destination 链的 ArbitrageExecutor");
-  console.log("  4. 在 Destination 链执行反向交易获利\n");
-
-  console.log("📋 交易哈希（用于比赛提交）:");
-  console.log(`  Swap: ${swapTx.hash}\n`);
+  console.log("\nDemo complete\n");
+  console.log("Next expected flow:");
+  console.log("  1. RCController listens for Swap");
+  console.log("  2. It detects sufficient spread");
+  console.log("  3. It triggers ArbitrageExecutor on Base Sepolia");
+  console.log(`\nSwap tx: ${swapTx.hash}\n`);
 }
 
 main()

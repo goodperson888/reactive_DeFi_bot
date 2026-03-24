@@ -29,17 +29,17 @@ async function main() {
 
   // ─── 步骤 1: 存入抵押品 ────────────────────────────────────────────────────
 
-  console.log("📍 步骤 1: 存入 0.5 ETH 作为抵押品");
+  console.log("📍 步骤 1: 存入 0.01 ETH 作为抵押品");
   const depositTx = await mockLending.deposit({
-    value: hre.ethers.parseEther("0.5"),
+    value: hre.ethers.parseEther("0.01"),
   });
   await depositTx.wait();
   console.log("  ✓ 存入成功");
 
   // ─── 步骤 2: 借款 ──────────────────────────────────────────────────────────
 
-  console.log("\n📍 步骤 2: 借款 1000 USDC");
-  const borrowAmount = 1000e6; // 1000 USDC (6 decimals)
+  console.log("\n📍 步骤 2: 借款 20 USDC");
+  const borrowAmount = 20e6; // 20 USDC (6 decimals)
   const borrowTx = await mockLending.borrow(borrowAmount);
   await borrowTx.wait();
   console.log("  ✓ 借款成功");

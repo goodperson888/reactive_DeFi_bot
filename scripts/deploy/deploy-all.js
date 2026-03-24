@@ -1,145 +1,144 @@
 /**
- * 部署脚本 - 完整流程
+ * Deployment script for the full mock flow.
  *
- * 部署顺序：
- * 1. Origin 链（Sepolia）：MockLending + MockDEX
- * 2. Destination 链（Base Sepolia）：MockDEX + Executors
- * 3. Reactive Network：RC Controller
- *
- * 使用方式：
- * MODE=mock npx hardhat run scripts/deploy/deploy-all.js
+ * It deploys contracts directly with per-chain RPC providers instead of
+ * relying on `hre.changeNetwork()`, which is not available in this project.
  */
 
 import hre from "hardhat";
 import fs from "fs";
 import path from "path";
-import { MODE, CHAINS } from "../../config/index.js";
+import { ethers } from "ethers";
+import { MODE, CHAINS, STRATEGY } from "../../config/index.js";
 
 const deployments = {};
+const DEPLOYER_KEY = process.env.WALLET_KEY1 || process.env.PRIVATE_KEY || "";
+
+function requireValue(label, value) {
+  if (!value) {
+    throw new Error(`Missing required config: ${label}`);
+  }
+
+  return value;
+}
+
+function getWallet(label, rpcUrl) {
+  requireValue("WALLET_KEY1 or PRIVATE_KEY", DEPLOYER_KEY);
+  requireValue(`${label} RPC`, rpcUrl);
+  const wallet = new ethers.Wallet(DEPLOYER_KEY, new ethers.JsonRpcProvider(rpcUrl));
+  return new ethers.NonceManager(wallet);
+}
+
+async function getFactory(contractName, signer) {
+  const artifact = await hre.artifacts.readArtifact(contractName);
+  return new ethers.ContractFactory(artifact.abi, artifact.bytecode, signer);
+}
+
+async function deploy(contractName, signer, args = [], overrides = {}) {
+  const factory = await getFactory(contractName, signer);
+  const contract = await factory.deploy(...args, overrides);
+  await contract.waitForDeployment();
+  return contract;
+}
+
+function getLiquidationThreshold() {
+  return ethers.parseUnits(String(STRATEGY.liquidation.healthFactorThreshold), 18);
+}
+
+function getArbitrageSpreadBps() {
+  return Math.round(Number(STRATEGY.arbitrage.spreadThreshold) * 100);
+}
 
 async function main() {
-  console.log(`\n🚀 开始部署 - 模式: ${MODE}\n`);
-  console.log("=" .repeat(60));
+  console.log(`\nStarting deployment, mode: ${MODE}\n`);
+  console.log("=".repeat(60));
 
-  // ─── 1. 部署 Origin 链合约 ────────────────────────────────────────────────
+  const originSigner = getWallet("Sepolia", CHAINS.origin.rpc);
+  const destinationSigner = getWallet("Base Sepolia", CHAINS.destination.rpc);
+  const reactiveSigner = getWallet("Reactive (lasna)", CHAINS.reactive.rpc);
+  const destinationAddress = await destinationSigner.getAddress();
+  const liquidationThreshold = getLiquidationThreshold();
+  const arbitrageSpreadBps = getArbitrageSpreadBps();
 
-  console.log("\n📍 步骤 1/3: 部署 Origin 链合约（Sepolia）\n");
+  console.log(`Configured liquidation health factor threshold: ${STRATEGY.liquidation.healthFactorThreshold}`);
+  console.log(`Configured arbitrage spread threshold: ${STRATEGY.arbitrage.spreadThreshold}% (${arbitrageSpreadBps} bps)\n`);
 
-  await hre.changeNetwork("sepolia");
+  console.log("\nStep 1/4: Deploy origin contracts on Sepolia\n");
 
-  // 部署 MockLending
-  console.log("  → 部署 MockLending...");
-  const MockLending = await hre.ethers.getContractFactory("MockLending");
-  const mockLending = await MockLending.deploy();
-  await mockLending.waitForDeployment();
+  console.log("  -> Deploying MockLending...");
+  const mockLending = await deploy("MockLending", originSigner);
   const mockLendingAddr = await mockLending.getAddress();
-  console.log(`    ✓ MockLending: ${mockLendingAddr}`);
+  console.log(`     MockLending: ${mockLendingAddr}`);
   deployments.MOCK_LENDING_ADDRESS = mockLendingAddr;
 
-  // 部署 MockDEX (Origin)
-  console.log("  → 部署 MockDEX (Origin)...");
-  const MockDEX = await hre.ethers.getContractFactory("MockDEX");
-  const mockDexA = await MockDEX.deploy({ value: hre.ethers.parseEther("0.1") });
-  await mockDexA.waitForDeployment();
+  console.log("  -> Deploying MockDEX (origin)...");
+  const mockDexA = await deploy("MockDEX", originSigner, [], {
+    // Keep enough origin liquidity for the demo swap while reducing faucet needs.
+    value: ethers.parseEther("0.02"),
+  });
   const mockDexAAddr = await mockDexA.getAddress();
-  console.log(`    ✓ MockDEX (Origin): ${mockDexAAddr}`);
+  console.log(`     MockDEX (origin): ${mockDexAAddr}`);
   deployments.MOCK_DEX_A_ADDRESS = mockDexAAddr;
 
-  // ─── 2. 部署 Destination 链合约 ───────────────────────────────────────────
+  console.log("\nStep 2/4: Deploy destination contracts on Base Sepolia\n");
 
-  console.log("\n📍 步骤 2/3: 部署 Destination 链合约（Base Sepolia）\n");
-
-  await hre.changeNetwork("base-sepolia");
-
-  // 部署 MockDEX (Destination)
-  console.log("  → 部署 MockDEX (Destination)...");
-  const mockDexB = await MockDEX.deploy({ value: hre.ethers.parseEther("0.1") });
-  await mockDexB.waitForDeployment();
+  console.log("  -> Deploying MockDEX (destination)...");
+  const mockDexB = await deploy("MockDEX", destinationSigner, [], {
+    // Destination DEX only needs a small seed balance for the current demo flow.
+    value: ethers.parseEther("0.01"),
+  });
   const mockDexBAddr = await mockDexB.getAddress();
-  console.log(`    ✓ MockDEX (Destination): ${mockDexBAddr}`);
+  console.log(`     MockDEX (destination): ${mockDexBAddr}`);
   deployments.MOCK_DEX_B_ADDRESS = mockDexBAddr;
 
-  // 部署 LiquidationExecutor（临时用零地址，后面更新）
-  console.log("  → 部署 LiquidationExecutor...");
-  const LiquidationExecutor = await hre.ethers.getContractFactory("LiquidationExecutor");
-  const liquidationExecutor = await LiquidationExecutor.deploy(
-    hre.ethers.ZeroAddress,  // rcController 地址稍后更新
-    hre.ethers.ZeroAddress   // vault 地址（MVP 暂不实现）
-  );
-  await liquidationExecutor.waitForDeployment();
+  console.log("  -> Deploying LiquidationExecutor...");
+  const liquidationExecutor = await deploy("LiquidationExecutor", destinationSigner, [
+    destinationAddress,
+    ethers.ZeroAddress,
+  ]);
   const liquidationExecutorAddr = await liquidationExecutor.getAddress();
-  console.log(`    ✓ LiquidationExecutor: ${liquidationExecutorAddr}`);
+  console.log(`     LiquidationExecutor: ${liquidationExecutorAddr}`);
   deployments.LIQUIDATION_EXECUTOR_ADDRESS = liquidationExecutorAddr;
 
-  // 部署 ArbitrageExecutor
-  console.log("  → 部署 ArbitrageExecutor...");
-  const ArbitrageExecutor = await hre.ethers.getContractFactory("ArbitrageExecutor");
-  const arbitrageExecutor = await ArbitrageExecutor.deploy(
-    hre.ethers.ZeroAddress,
-    hre.ethers.ZeroAddress
-  );
-  await arbitrageExecutor.waitForDeployment();
+  console.log("  -> Deploying ArbitrageExecutor...");
+  const arbitrageExecutor = await deploy("ArbitrageExecutor", destinationSigner, [
+    destinationAddress,
+    ethers.ZeroAddress,
+  ]);
   const arbitrageExecutorAddr = await arbitrageExecutor.getAddress();
-  console.log(`    ✓ ArbitrageExecutor: ${arbitrageExecutorAddr}`);
+  console.log(`     ArbitrageExecutor: ${arbitrageExecutorAddr}`);
   deployments.ARBITRAGE_EXECUTOR_ADDRESS = arbitrageExecutorAddr;
 
-  // ─── 3. 部署 Reactive Network 合约 ────────────────────────────────────────
+  console.log("\nStep 3/4: Deploy RCController on Reactive Network (lasna)\n");
 
-  console.log("\n📍 步骤 3/3: 部署 Reactive Network 合约\n");
-
-  await hre.changeNetwork("reactive");
-
-  console.log("  → 部署 RCController...");
-  const RCController = await hre.ethers.getContractFactory("RCController");
-  const rcController = await RCController.deploy(
-    {
-      chainId: CHAINS.origin.chainId,
-      mockLending: mockLendingAddr,
-      mockDexA: mockDexAAddr,
-    },
-    {
-      chainId: CHAINS.destination.chainId,
-      liquidationExecutor: liquidationExecutorAddr,
-      arbitrageExecutor: arbitrageExecutorAddr,
-      mockDexB: mockDexBAddr,
-    }
-  );
-  await rcController.waitForDeployment();
+  console.log("  -> Deploying RCController...");
+  const rcController = await deploy("RCController", reactiveSigner, [
+    mockLendingAddr,
+    mockDexAAddr,
+    liquidationExecutorAddr,
+    arbitrageExecutorAddr,
+    liquidationThreshold,
+    arbitrageSpreadBps,
+  ]);
   const rcControllerAddr = await rcController.getAddress();
-  console.log(`    ✓ RCController: ${rcControllerAddr}`);
+  console.log(`     RCController: ${rcControllerAddr}`);
   deployments.RC_CONTROLLER_ADDRESS = rcControllerAddr;
 
-  // ─── 4. 更新 Executor 的 RC Controller 地址 ──────────────────────────────
+  console.log("\nStep 4/4: Update destination executors\n");
 
-  console.log("\n📍 步骤 4/4: 更新合约配置\n");
+  console.log("  -> Updating LiquidationExecutor RC controller...");
+  await (await liquidationExecutor.connect(destinationSigner).updateRCController(rcControllerAddr)).wait();
+  console.log("     LiquidationExecutor updated");
 
-  await hre.changeNetwork("base-sepolia");
+  console.log("  -> Updating ArbitrageExecutor RC controller...");
+  await (await arbitrageExecutor.connect(destinationSigner).updateRCController(rcControllerAddr)).wait();
+  console.log("     ArbitrageExecutor updated");
 
-  console.log("  → 更新 LiquidationExecutor...");
-  const liquidationExecutorContract = await hre.ethers.getContractAt(
-    "LiquidationExecutor",
-    liquidationExecutorAddr
-  );
-  await liquidationExecutorContract.updateRCController(rcControllerAddr);
-  console.log("    ✓ 已更新");
-
-  console.log("  → 更新 ArbitrageExecutor...");
-  const arbitrageExecutorContract = await hre.ethers.getContractAt(
-    "ArbitrageExecutor",
-    arbitrageExecutorAddr
-  );
-  await arbitrageExecutorContract.updateRCController(rcControllerAddr);
-  console.log("    ✓ 已更新");
-
-  // ─── 5. 保存部署地址到 .env ──────────────────────────────────────────────
-
-  console.log("\n📍 保存部署地址到 .env\n");
+  console.log("\nSaving deployment addresses to .env\n");
   saveDeployments();
 
-  // ─── 完成 ─────────────────────────────────────────────────────────────────
-
   console.log("\n" + "=".repeat(60));
-  console.log("\n✅ 部署完成！\n");
+  console.log("\nDeployment complete\n");
   printSummary();
 }
 
@@ -157,21 +156,20 @@ function saveDeployments() {
   }
 
   fs.writeFileSync(envPath, envContent);
-  console.log("  ✓ 已更新 .env 文件");
+  console.log("  .env updated");
 }
 
 function printSummary() {
-  console.log("📋 部署摘要：\n");
-  console.log("Origin 链（Sepolia）:");
-  console.log(`  MockLending:  ${deployments.MOCK_LENDING_ADDRESS}`);
-  console.log(`  MockDEX:      ${deployments.MOCK_DEX_A_ADDRESS}`);
-  console.log("\nDestination 链（Base Sepolia）:");
-  console.log(`  MockDEX:              ${deployments.MOCK_DEX_B_ADDRESS}`);
-  console.log(`  LiquidationExecutor:  ${deployments.LIQUIDATION_EXECUTOR_ADDRESS}`);
-  console.log(`  ArbitrageExecutor:    ${deployments.ARBITRAGE_EXECUTOR_ADDRESS}`);
-  console.log("\nReactive Network:");
+  console.log("Deployment summary:\n");
+  console.log("Origin (Sepolia):");
+  console.log(`  MockLending: ${deployments.MOCK_LENDING_ADDRESS}`);
+  console.log(`  MockDEX: ${deployments.MOCK_DEX_A_ADDRESS}`);
+  console.log("\nDestination (Base Sepolia):");
+  console.log(`  MockDEX: ${deployments.MOCK_DEX_B_ADDRESS}`);
+  console.log(`  LiquidationExecutor: ${deployments.LIQUIDATION_EXECUTOR_ADDRESS}`);
+  console.log(`  ArbitrageExecutor: ${deployments.ARBITRAGE_EXECUTOR_ADDRESS}`);
+  console.log("\nReactive Network (lasna):");
   console.log(`  RCController: ${deployments.RC_CONTROLLER_ADDRESS}`);
-  console.log("\n💡 提示：地址已保存到 .env 文件");
 }
 
 main()

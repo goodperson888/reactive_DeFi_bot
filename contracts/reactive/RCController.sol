@@ -97,11 +97,11 @@ contract RCController is AbstractReactive {
     // 事件签名（keccak256）
     // HealthFactorUpdated(address,uint256,uint256,uint256)
     uint256 private constant HEALTH_FACTOR_UPDATED_TOPIC =
-        0x8c0d6b0b6f3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c;
+        0x4ec2e8a3bd69e95166a040594140718c1942ce872ce67baf08738563aadfe9d7;
 
     // Swap(address,address,address,uint256,uint256,uint256)
     uint256 private constant SWAP_TOPIC =
-        0x7c0d6b0b6f3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c3e3c;
+        0xd6d34547c69c5ee3d2667625c188acf1006abb93e0ee7cf03925c67cf7760413;
 
     uint64 private constant CALLBACK_GAS_LIMIT = 1000000;
 
