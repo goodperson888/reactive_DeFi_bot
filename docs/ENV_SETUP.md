@@ -116,6 +116,9 @@ ETHERSCAN_API_KEY=你的API_KEY
 2. 注册账号
 3. 进入 API Keys 页面
 4. 创建新的 API Key
+Access BaseScan data with Etherscan API V2
+API access for data on BASE is provided through Etherscan API V2. A single API key can be used to query data for BASE and more than 60 other EVM chains.
+那就不用单独注册 Basescan 了，直接用 Etherscan 的 key 就行。
 
 ```bash
 BASESCAN_API_KEY=你的API_KEY

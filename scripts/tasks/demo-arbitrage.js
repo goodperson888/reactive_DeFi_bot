@@ -13,6 +13,32 @@
 
 import hre from "hardhat";
 import { CONTRACTS } from "../../config/index.js";
+import fs from "fs";
+import path from "path";
+
+// 保存交易哈希到文件
+function saveTransaction(type, description, txHash) {
+  const transactionsPath = path.join(process.cwd(), "TRANSACTIONS.md");
+  let content = "";
+
+  if (fs.existsSync(transactionsPath)) {
+    content = fs.readFileSync(transactionsPath, "utf8");
+  }
+
+  const timestamp = new Date().toISOString();
+  const entry = `- [${timestamp}] **${type}**: ${description}\n  - 交易哈希: \`${txHash}\`\n`;
+
+  // 检查是否已有该类型的章节
+  const typePattern = new RegExp(`^### ${type}$`, "m");
+  if (!typePattern.test(content)) {
+    content += `\n### ${type}\n\n${entry}`;
+  } else {
+    content = content.replace(typePattern, `### ${type}\n\n${entry}`);
+  }
+
+  fs.writeFileSync(transactionsPath, content);
+  console.log(`  ✓ 交易已保存到 TRANSACTIONS.md`);
+}
 
 async function main() {
   console.log("\n🎬 套利演示脚本\n");
@@ -97,6 +123,10 @@ async function main() {
 
   console.log("📋 交易哈希（用于比赛提交）:");
   console.log(`  Swap: ${swapTx.hash}\n`);
+
+  // 保存交易哈希到文件
+  console.log("💾 保存交易记录到 TRANSACTIONS.md...");
+  saveTransaction("套利演示 - Swap", "在 Origin 链执行 Swap，触发价差套利", swapTx.hash);
 }
 
 main()

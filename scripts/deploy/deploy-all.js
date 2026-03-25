@@ -13,7 +13,7 @@
 import hre from "hardhat";
 import fs from "fs";
 import path from "path";
-import { MODE, CHAINS } from "../../config/index.js";
+import { MODE } from "../../config/index.js";
 
 const deployments = {};
 
@@ -92,17 +92,13 @@ async function main() {
   console.log("  → 部署 RCController...");
   const RCController = await hre.ethers.getContractFactory("RCController");
   const rcController = await RCController.deploy(
-    {
-      chainId: CHAINS.origin.chainId,
-      mockLending: mockLendingAddr,
-      mockDexA: mockDexAAddr,
-    },
-    {
-      chainId: CHAINS.destination.chainId,
-      liquidationExecutor: liquidationExecutorAddr,
-      arbitrageExecutor: arbitrageExecutorAddr,
-      mockDexB: mockDexBAddr,
-    }
+    mockLendingAddr,
+    mockDexAAddr,
+    liquidationExecutorAddr,
+    arbitrageExecutorAddr,
+    mockDexBAddr,
+    hre.ethers.parseUnits("1.02", 18), // healthFactorThreshold
+    150                                  // spreadThreshold (1.5%)
   );
   await rcController.waitForDeployment();
   const rcControllerAddr = await rcController.getAddress();

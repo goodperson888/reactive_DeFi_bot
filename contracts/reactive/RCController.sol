@@ -114,6 +114,7 @@ contract RCController is AbstractReactive {
     // Destination 链合约地址
     address public liquidationExecutor;
     address public arbitrageExecutor;
+    address public mockDexB;  // Destination 链 DEX（套利卖出端）
 
     // 策略参数
     uint256 public liquidationHealthFactorThreshold;  // 1.02e18
@@ -130,6 +131,7 @@ contract RCController is AbstractReactive {
         address _mockDexA,
         address _liquidationExecutor,
         address _arbitrageExecutor,
+        address _mockDexB,
         uint256 _healthFactorThreshold,
         uint256 _spreadThreshold
     ) payable {
@@ -137,6 +139,7 @@ contract RCController is AbstractReactive {
         mockDexA = _mockDexA;
         liquidationExecutor = _liquidationExecutor;
         arbitrageExecutor = _arbitrageExecutor;
+        mockDexB = _mockDexB;
         liquidationHealthFactorThreshold = _healthFactorThreshold;
         arbitrageSpreadThreshold = _spreadThreshold;
         owner = msg.sender;
@@ -230,8 +233,16 @@ contract RCController is AbstractReactive {
             (address, address, address, uint256, uint256, uint256)
         );
 
-        // 简化：假设 Destination 链价格固定为 3050 USDC
-        uint256 priceB = 3050e6;
+        // 从 Destination DEX 读取实时价格（通过 staticcall，ReactVM 支持跨链读取）
+        // 如果读取失败则使用 newPrice 作为 fallback（避免 revert）
+        uint256 priceB = newPrice; // fallback
+        (bool ok, bytes memory ret) = mockDexB.staticcall(
+            abi.encodeWithSignature("getPrice()")
+        );
+        if (ok && ret.length == 32) {
+            priceB = abi.decode(ret, (uint256));
+        }
+
         uint256 spreadPct = _calculateSpread(newPrice, priceB);
 
         if (spreadPct < arbitrageSpreadThreshold) {
@@ -240,15 +251,21 @@ contract RCController is AbstractReactive {
 
         emit ArbitrageTriggered(newPrice, priceB, spreadPct);
 
-        // 触发 Destination 链执行套利
+        // 套利方向：Origin 价格低 → 在 Origin 买入，Destination 卖出
+        // 套利方向：Origin 价格高 → 在 Destination 买入，Origin 卖出（此处简化为单向）
+        address tokenIn = address(0);   // ETH
+        address tokenOut = address(1);  // USDC（MockDEX 常量）
+        uint256 amountIn = 1e17;        // 0.1 ETH（保守仓位）
+        uint256 minProfit = (amountIn * arbitrageSpreadThreshold) / 20000; // 50% 价差作为最低利润
+
         bytes memory payload = abi.encodeWithSignature(
             "executeArbitrage(address,address,address,address,uint256,uint256)",
             mockDexA,
-            address(0), // Destination DEX（需要配置）
-            address(0), // tokenIn
-            address(0), // tokenOut
-            1e18,       // amountIn（示例）
-            0           // minProfit
+            mockDexB,
+            tokenIn,
+            tokenOut,
+            amountIn,
+            minProfit
         );
 
         emit Callback(
@@ -279,6 +296,20 @@ contract RCController is AbstractReactive {
         require(msg.sender == owner, "Only owner");
         liquidationHealthFactorThreshold = newHealthFactorThreshold;
         arbitrageSpreadThreshold = newSpreadThreshold;
+    }
+
+    function updateExecutors(
+        address newLiquidationExecutor,
+        address newArbitrageExecutor
+    ) external {
+        require(msg.sender == owner, "Only owner");
+        liquidationExecutor = newLiquidationExecutor;
+        arbitrageExecutor = newArbitrageExecutor;
+    }
+
+    function updateMockDexB(address newMockDexB) external {
+        require(msg.sender == owner, "Only owner");
+        mockDexB = newMockDexB;
     }
 
     function pause() external {
