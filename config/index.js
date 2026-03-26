@@ -1,27 +1,38 @@
 import "dotenv/config";
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 
 // ─── 链配置 ───────────────────────────────────────────────────────────────────
 
-export const MODE = process.env.MODE || "mock";
-export const isProd = MODE === "prod";
+const LEGACY_MODE = process.env.MODE;
+
+export const APP_ENV =
+  process.env.APP_ENV ||
+  (LEGACY_MODE === "prod" ? "testnet" : LEGACY_MODE === "mock" ? "local" : "local");
+
+export const PROTOCOL_MODE = process.env.PROTOCOL_MODE || LEGACY_MODE || "mock";
+
+export const MODE = PROTOCOL_MODE; // 兼容旧脚本
+export const isProd = PROTOCOL_MODE === "prod";
+export const isLocal = APP_ENV === "local";
+export const isTestnet = APP_ENV === "testnet";
+export const isMainnet = APP_ENV === "mainnet";
+
+const LOCAL_RPC = process.env.LOCAL_RPC_URL || "http://127.0.0.1:8545";
 
 export const CHAINS = {
   origin: {
-    name: "sepolia",
-    chainId: 11155111,
-    rpc: process.env.SEPOLIA_RPC_URL,
+    name: isLocal ? "localhost" : isMainnet ? "ethereum" : "sepolia",
+    chainId: isLocal ? 31337 : isMainnet ? Number(process.env.ORIGIN_MAINNET_CHAIN_ID || 1) : 11155111,
+    rpc: isLocal ? LOCAL_RPC : isMainnet ? (process.env.ORIGIN_MAINNET_RPC_URL || process.env.ETHEREUM_RPC_URL || "") : process.env.SEPOLIA_RPC_URL,
   },
   destination: {
-    name: "base-sepolia",
-    chainId: 84532,
-    rpc: process.env.BASE_SEPOLIA_RPC_URL,
+    name: isLocal ? "localhost" : isMainnet ? "base" : "base-sepolia",
+    chainId: isLocal ? 31337 : isMainnet ? Number(process.env.DESTINATION_MAINNET_CHAIN_ID || 8453) : 84532,
+    rpc: isLocal ? LOCAL_RPC : isMainnet ? (process.env.DESTINATION_MAINNET_RPC_URL || process.env.BASE_RPC_URL || "") : process.env.BASE_SEPOLIA_RPC_URL,
   },
   reactive: {
-    name: "reactive-testnet",
-    chainId: 5318008,
-    rpc: process.env.REACTIVE_RPC_URL || "https://kopli-rpc.rkt.ink",
+    name: isLocal ? "localhost" : isMainnet ? "reactive-mainnet" : "reactive-testnet",
+    chainId: isLocal ? 31337 : Number(process.env.REACTIVE_CHAIN_ID || 5318008),
+    rpc: isLocal ? LOCAL_RPC : (process.env.REACTIVE_RPC_URL || "https://kopli-rpc.rkt.ink"),
   },
 };
 
@@ -60,7 +71,7 @@ const CONTRACTS_ALL = {
   },
 };
 
-export const CONTRACTS = CONTRACTS_ALL[MODE];
+export const CONTRACTS = CONTRACTS_ALL[PROTOCOL_MODE];
 
 // ─── 策略参数 ──────────────────────────────────────────────────────────────────
 
@@ -79,6 +90,6 @@ export const STRATEGY = {
   risk: {
     maxConsecutiveLosses: 3,
     gasProfitCheck:       true,
-    maxGasGwei:           isProd ? 50 : 100,
+    maxGasGwei:           isProd ? 50 : 1,//手续费上限，单位gwei
   },
 };

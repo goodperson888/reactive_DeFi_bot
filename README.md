@@ -1,290 +1,281 @@
 # Reactive DeFi Bot
 
-基于 Reactive Network 的跨链 DeFi 自动化系统，支持清算和套利策略。
+基于 Reactive Network 的跨链 DeFi 自动化系统，当前仓库同时包含两条路线：
 
-## 📋 项目概述
+- 推荐路线：面向前端用户流的 `UserVault + RCFactory + UserRC`
+- 旧路线：早期比赛 / 演示使用的 `RCController + Executors`
 
-本项目实现了一个完整的链上自动赚钱系统，核心特点：
+这两条路线现在共存在一个仓库里，但推荐你优先使用“用户独立 Vault + RC”这套新流程，尤其是本地开发和前端联调。
 
-- **清算模块**：监听借贷协议健康度变化，自动执行清算获取奖励
-- **套利模块**：监听 DEX 价格变化，自动执行跨链套利
-- **RC 驱动**：使用 Reactive Contract 实现真正的链上自动化（无需 bot 轮询）
-- **跨链执行**：Origin 链监听 → Reactive Network 判断 → Destination 链执行
-- **模式切换**：支持 mock（演示）和 prod（真实交易）两种模式
+## 📋 当前状态
 
-## 🏗️ 架构
+- 前端目录在 `frontend/`
+- 推荐的本地开发组合是 `APP_ENV=local + PROTOCOL_MODE=mock`
+- 本地 mock 流已经可以跑通：`MockLending`、`MockDEX`、`UserVault`、`RCFactory`
+- `deploy:user-flow` 会自动把地址同步到 `frontend/.env.local`
+- `PROTOCOL_MODE=prod` 目前仍属于进行中状态，前端用户流还没有完全对齐真实协议执行逻辑
+- 旧的 `deploy-all.js`、`demo-liquidation.js`、`demo-arbitrage.js` 仍然保留，但它们属于 legacy demo，不是当前前端主流程
 
+## 🏗️ 推荐架构
+
+### 用户流
+
+```text
+MockLending / MockDEX (Origin 事件源)
+            ↓
+      UserRC (Reactive)
+            ↓
+ UserVault (Destination 资金与策略状态)
+            ↓
+        Frontend
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Origin 链（Sepolia）                      │
-│  ┌──────────────┐              ┌──────────────┐            │
-│  │ MockLending  │              │  MockDEX A   │            │
-│  │  (清算源)     │              │  (套利源)     │            │
-│  └──────┬───────┘              └──────┬───────┘            │
-│         │ emit HealthFactorUpdated    │ emit Swap          │
-└─────────┼─────────────────────────────┼────────────────────┘
-          │                             │
-          ▼                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Reactive Network（监听 + 判断）                 │
-│                  ┌──────────────────┐                       │
-│                  │  RC Controller   │                       │
-│                  │  - 监听事件       │                       │
-│                  │  - 判断条件       │                       │
-│                  │  - 触发执行       │                       │
-│                  └────────┬─────────┘                       │
-└────���──────────────────────┼─────────────────────────────────┘
-                            │ 跨链调用
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Destination 链（Base Sepolia）                  │
-│  ┌──────────────────┐    ┌──────────────────┐              │
-│  │ Liquidation      │    │ Arbitrage        │              │
-│  │ Executor         │    │ Executor         │              │
-│  │ (执行清算)        │    │ (执行套利)        │              │
-│  └──────────────────┘    └──────────────────┘              │
-└─────────────────────────────────────────────────────────────┘
-```
+
+这套流里：
+
+- 用户资金和策略状态存放在 `UserVault`
+- 每个用户通过 `RCFactory` 部署自己的 `UserRC`
+- `UserRC` 负责监听事件并回调 `UserVault`
+- 前端主要围绕 `UserVault` 和 `RCFactory` 交互
+
+### 本地开发时的特殊说明
+
+在 `APP_ENV=local` 下，Origin / Destination / Reactive 这三条“逻辑链”都会映射到同一个本地 Hardhat 节点 `http://127.0.0.1:8545`。  
+也就是说，本地调试时虽然代码里保留了跨链概念，但底层实际跑在同一条本地链上。
 
 ## 🚀 快速开始
 
 ### 1. 安装依赖
 
 ```bash
-# 使用 Node 24
 nvm use 24
-
-# 安装依赖
 npm install
+npm install --prefix frontend
 ```
 
-### 2. 本地测试（无需配置）
+### 2. 准备环境变量
 
 ```bash
-# 运行单元测试（完全本地，不需要 .env 和测试币）
-npx hardhat test
-
-# 测试结果：31/33 通过 ✅
-```
-
-### 3. 配置环境（部署测试网时需要）
-
-```bash
-# 复制环境变量模板
 cp .env.example .env
-
-# 编辑 .env，填入：
-# - PRIVATE_KEY（部署账户私钥）
-# - SEPOLIA_RPC_URL
-# - BASE_SEPOLIA_RPC_URL
-# - REACTIVE_RPC_URL（默认：https://kopli-rpc.rkt.ink）
-
-# 详细配置教程见：docs/ENV_SETUP.md
 ```
 
-### 4. 部署合约
+推荐本地开发配置：
+
+```env
+APP_ENV=local
+PROTOCOL_MODE=mock
+MODE=mock
+LOCAL_RPC_URL=http://127.0.0.1:8545
+```
+
+说明：
+
+- `APP_ENV` 决定你连本地、测试网还是主网
+- `PROTOCOL_MODE` 决定你走 mock 协议还是真实协议逻辑
+- `MODE` 目前只是兼容旧脚本，建议以后主要看 `APP_ENV` 和 `PROTOCOL_MODE`
+
+### 3. 启动本地链
 
 ```bash
-# 部署所有合约（mock 模式）
-MODE=mock npx hardhat run scripts/deploy/deploy-all.js
-
-# 部署完成后，合约地址会自动保存到 .env
+npm run local:node
 ```
 
-### 5. 运行演示
+这条命令要一直保持运行。  
+本地默认使用 Hardhat 提供的测试账户，不需要真实测试网私钥。
 
-#### 清算演示
+### 4. 部署本地用户流合约
+
+新开一个终端执行：
 
 ```bash
-# 模拟清算场景
-npx hardhat run scripts/tasks/demo-liquidation.js --network sepolia
+npm run deploy:user-flow
 ```
 
-流程：
-1. 存入 0.5 ETH 抵押品
-2. 借款 1000 USDC
-3. 手动降低 ETH 价格（3000 → 2400）
-4. 健康度 < 1.02，触发 `HealthFactorUpdated` 事件
-5. RC Controller 监听到事件，触发清算
+这条命令会：
 
-#### 套利演示
+- 部署或复用 `MockLending`
+- 部署或复用 `MockDEX`
+- 部署 `UserVault`
+- 部署 `RCFactory`
+- 回写根目录 `.env`
+- 自动生成 `frontend/.env.local`
+
+### 5. 启动前端
 
 ```bash
-# 模拟套利场景
-npx hardhat run scripts/tasks/demo-arbitrage.js --network sepolia
+npm run frontend:dev
 ```
 
-流程：
-1. 在两条链的 DEX 设置不同价格（3000 vs 3050）
-2. 在 Origin 链执行 Swap
-3. 触发 `Swap` 事件
-4. RC Controller 检测到价差 > 1.5%，触发套利
+前端默认地址：
+
+```text
+http://127.0.0.1:3000
+```
+
+### 6. 钱包连接
+
+如果你要在前端里实际点击存款、部署 RC、更新策略，钱包需要连接到本地链：
+
+- RPC: `http://127.0.0.1:8545`
+- Chain ID: `31337`
+- 可导入 Hardhat 默认账户 0：
+
+```text
+Address: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+Private Key: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+```
+
+只可用于本地开发，绝对不要用于任何真实网络。
+
+## ⚙️ 环境组合
+
+推荐理解方式是把“网络环境”和“协议逻辑”分开看：
+
+- `APP_ENV=local` + `PROTOCOL_MODE=mock`
+说明：纯本地开发，推荐默认组合
+
+- `APP_ENV=testnet` + `PROTOCOL_MODE=mock`
+说明：测试网上跑 mock 协议演示
+
+- `APP_ENV=testnet` + `PROTOCOL_MODE=prod`
+说明：测试网下接近真实协议逻辑的集成测试
+
+- `APP_ENV=mainnet` + `PROTOCOL_MODE=prod`
+说明：真实环境
+
+目前需要特别注意：
+
+- `deploy:user-flow` 现在主要面向 `PROTOCOL_MODE=mock`
+- 前端用户流的 `prod` 逻辑还没有完全打通
+- 非 `local` 环境下需要填写真实 `PRIVATE_KEY` 和对应 RPC
+
+## 🔧 常用命令
+
+```bash
+# 编译
+npm run compile
+
+# 测试
+npm test
+
+# 启动本地链
+npm run local:node
+
+# 部署前端用户流
+npm run deploy:user-flow
+
+# 同步前端环境变量
+npm run sync:frontend-env
+
+# 启动前端
+npm run frontend:dev
+
+# 构建前端
+npm run frontend:build
+
+# 前端 lint
+npm run frontend:lint
+```
 
 ## 📁 项目结构
 
-```
+```text
 reactive/
 ├── contracts/
-│   ├── mocks/              # Mock 合约（演示用）
-│   │   ├── MockLending.sol
-│   │   └── MockDEX.sol
-│   ├── destination/        # Destination 链执行合约
+│   ├── mocks/
+│   │   ├── MockDEX.sol
+│   │   └── MockLending.sol
+│   ├── destination/
+│   │   ├── ArbitrageExecutor.sol
 │   │   ├── LiquidationExecutor.sol
-│   │   └── ArbitrageExecutor.sol
-│   └── reactive/           # Reactive Network 合约
-│       └── RCController.sol
+│   │   └── UserVault.sol
+│   └── reactive/
+│       ├── RCController.sol
+│       ├── RCFactory.sol
+│       └── UserRC.sol
+├── config/
+│   └── index.js
+├── frontend/
+│   ├── app/
+│   ├── components/
+│   ├── lib/
+│   └── package.json
 ├── scripts/
 │   ├── deploy/
-│   │   └── deploy-all.js   # 完整部署脚本
+│   │   ├── deploy-all.js
+│   │   └── deploy-user-flow.js
+│   ├── sync-frontend-env.js
 │   └── tasks/
-│       ├── demo-liquidation.js
-│       └── demo-arbitrage.js
 ├── test/
-│   ├── MockLending.test.js
-│   ├── MockDEX.test.js
-│   └── Executors.test.js
-├── config/
-│   └── index.js            # 环境配置（mock/prod 切换）
-├── docs/
-│   └── ENV_SETUP.md        # 详细配置教程
 ├── hardhat.config.js
 ├── .env.example
 └── README.md
 ```
 
-## ⚙️ 配置说明
+## 🧭 两条路线的区别
 
-### 模式切换
+### 推荐路线
 
-在 `.env` 中设置 `MODE`：
+文件核心：
 
-- **mock**：使用 MockLending 和 MockDEX，方便演示和测试
-- **prod**：使用真实的 Aave、Uniswap、SushiSwap
+- `contracts/destination/UserVault.sol`
+- `contracts/reactive/RCFactory.sol`
+- `contracts/reactive/UserRC.sol`
+- `frontend/`
+- `scripts/deploy/deploy-user-flow.js`
 
-### 策略参数
+适用场景：
 
-在 `config/index.js` 中调整：
+- 本地联调
+- 前端交互
+- 用户独立仓位 / 独立 RC 流程
 
-```javascript
-STRATEGY: {
-  liquidation: {
-    healthFactorThreshold: "1.02",  // 清算触发阈值
-    maxDebtUSD: 5000,               // 单次最大清算金额
-    minProfitUSD: 10,               // 最小利润要求
-  },
-  arbitrage: {
-    spreadThreshold: 1.5,           // 套利触发价差（%）
-    maxPoolLiquidityUSD: 500000,    // 目标池子最大流动性
-    maxPositionPct: 20,             // 单次最大仓位（%）
-    slippagePct: 2,                 // 滑点容忍度（%）
-  },
-  risk: {
-    maxConsecutiveLosses: 3,        // 连续亏损停机阈值
-    gasProfitCheck: true,           // Gas 成本检查
-    maxGasGwei: 50,                 // 最大 Gas 价格
-  },
-}
-```
+### Legacy 路线
 
-## 🔧 开发指南
+文件核心：
 
-### 编译合约
+- `contracts/reactive/RCController.sol`
+- `contracts/destination/LiquidationExecutor.sol`
+- `contracts/destination/ArbitrageExecutor.sol`
+- `scripts/deploy/deploy-all.js`
+- `scripts/tasks/demo-liquidation.js`
+- `scripts/tasks/demo-arbitrage.js`
 
-```bash
-npx hardhat compile
-```
+适用场景：
 
-### 测试合约
+- 旧的比赛演示
+- 旧的测试网脚本
 
-```bash
-# 运行所有测试
-npx hardhat test
+注意：
 
-# 运行特定测试
-npx hardhat test test/MockLending.test.js
-```
+- 这套路线目前不是前端主流程
+- README 里不再把它当作默认入口
+- 如果你只是想把前端跑起来，不需要先碰这套 legacy demo
 
-### 验证合约
+## 🧪 当前推荐调试顺序
 
-```bash
-# Sepolia
-npx hardhat verify --network sepolia <合约地址> <构造函数参数>
+如果你现在只是想验证“本地链 + 前端 + 用户流”是否正常，推荐顺序：
 
-# Base Sepolia
-npx hardhat verify --network base-sepolia <合约地址> <构造函数参数>
-```
+1. `cp .env.example .env`
+2. 把 `.env` 设成 `APP_ENV=local`、`PROTOCOL_MODE=mock`
+3. `npm run local:node`
+4. `npm run deploy:user-flow`
+5. `npm run frontend:dev`
+6. 钱包切到本地链 `31337`
+7. 在前端里测试存款、部署 RC、同步 RC、更新策略
 
-## ✅ Reactive Network SDK 适配完成
+## ⚠️ 注意事项
 
-`RCController.sol` 已基于 [Reactive Network 官方示例](https://github.com/Reactive-Network/reactive-smart-contract-demos/tree/main/src/demos/uniswap-v2-stop-order) 完成适配：
+- 不要把 `.env` 提交到 git
+- 本地 Hardhat 账户只可用于本地调试
+- `frontend/.env.local` 是部署脚本自动生成的，不建议手改
+- 目前 `prod` 仍然不是这套用户流的最终形态，跑实网前需要继续补执行逻辑和真实协议适配
 
-**已实现的核心功能：**
-- ✅ 继承 `AbstractReactive` 基类
-- ✅ 实现 `react(LogRecord calldata log)` 回调函数
-- ✅ 使用 `service.subscribe()` 订阅 Origin 链事件
-- ✅ 使用 `emit Callback()` 触发 Destination 链跨链调用
-- ✅ 支持 ReactVM 双状态模型
-
-**订阅的事件：**
-- `HealthFactorUpdated(address,uint256,uint256,uint256)` - 监听借贷健康度变化
-- `Swap(address,address,address,uint256,uint256,uint256)` - 监听 DEX 价格变化
-
-**工作流程：**
-1. Origin 链（Sepolia）触发事件 → 2. Reactive Network 监听并调用 `react()` → 3. 判断条件满足 → 4. 发送 `Callback` 事件 → 5. Destination 链（Base Sepolia）执行操作
-
-## 📊 比赛提交清单
-
-根据 Reactive Network 比赛要求，需要提交：
-
-- [x] 完整合约代码（MockLending, MockDEX, RCController, Executors）
-- [x] 部署脚本（支持 mock/prod 切换）
-- [x] 演示脚本（清算 + 套利）
-- [x] 测试用例（31/33 通过）
-- [ ] 已部署合约地址（运行部署脚本后填入）
-- [ ] 完整交易哈希记录（运行演示脚本后获取）
-- [ ] 演示视频（≤5 分钟）
-- [x] 项目说明文档（本 README）
-
-### 交易哈希记录模板
-
-```
-Origin 链（Sepolia）:
-- MockLending 部署: 0x...
-- MockDEX 部署: 0x...
-- 清算演示 - 存入: 0x...
-- 清算演示 - 借款: 0x...
-- 清算演示 - 降价: 0x...
-- 套利演示 - Swap: 0x...
-
-Destination 链（Base Sepolia）:
-- LiquidationExecutor 部署: 0x...
-- ArbitrageExecutor 部署: 0x...
-- MockDEX 部署: 0x...
-
-Reactive Network:
-- RCController 部署: 0x...
-```
-
-## ⚠️ 安全提示
-
-- **私钥安全**：永远不要提交 `.env` 文件到 Git
-- **测试网使用**：初期只在测试网运行，确保逻辑正确后再考虑主网
-- **资金管理**：MVP 阶段使用小额资金测试
-- **风控机制**：连续亏损 3 次会自动停机
-
-## 📚 参考资料
+## 📚 参考
 
 - [Reactive Network 官方文档](https://dev.reactive.network/)
 - [Reactive Network 示例代码](https://github.com/Reactive-Network/reactive-smart-contract-demos)
-- [环境配置详细教程](docs/ENV_SETUP.md)
 - [Hardhat 文档](https://hardhat.org/docs)
-- [Aave v3 文档](https://docs.aave.com/)
-- [Uniswap v2 文档](https://docs.uniswap.org/contracts/v2/overview)
 
 ## 📝 License
 
 MIT
-
----
-
-**🤖 Generated with Claude Code**

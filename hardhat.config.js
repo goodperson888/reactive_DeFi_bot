@@ -1,9 +1,12 @@
 import "dotenv/config";
 import "@nomicfoundation/hardhat-toolbox";
-import { CHAINS } from "./config/index.js";
+import { CHAINS, isLocal } from "./config/index.js";
 
-// 只在私钥是有效的 0x 开头 hex 字符串时才使用
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const DEFAULT_LOCAL_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const PRIVATE_KEY =
+  isLocal
+    ? (process.env.LOCAL_PRIVATE_KEY || DEFAULT_LOCAL_PRIVATE_KEY)
+    : process.env.PRIVATE_KEY;
 const accounts =
   PRIVATE_KEY && /^0x[0-9a-fA-F]{64}$/.test(PRIVATE_KEY)
     ? [PRIVATE_KEY]

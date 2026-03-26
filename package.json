@@ -3,7 +3,15 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "test": "hardhat test"
+    "compile": "hardhat compile",
+    "local:node": "hardhat node",
+    "test": "hardhat test",
+    "deploy:user-flow": "npx hardhat run scripts/deploy/deploy-user-flow.js",
+    "sync:frontend-env": "node scripts/sync-frontend-env.js",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:start": "npm --prefix frontend run start",
+    "frontend:lint": "npm --prefix frontend run lint"
   },
   "devDependencies": {
     "hardhat": "^2.19.0",

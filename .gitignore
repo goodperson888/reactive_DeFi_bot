@@ -4,3 +4,7 @@ artifacts/
 cache/
 typechain-types/
 deployments/
+frontend/node_modules/
+frontend/.next/
+frontend/*.tsbuildinfo
+frontend/.env.local
