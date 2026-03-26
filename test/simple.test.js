@@ -1,5 +1,5 @@
-import { expect } from "chai";
-import hre from "hardhat";
+const { expect } = require("chai");
+const hre = require("hardhat");
 
 describe("简单测试", function () {
   it("应该能获取 signers", async function () {

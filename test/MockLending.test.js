@@ -1,6 +1,6 @@
-import { expect } from "chai";
-import hre from "hardhat";
-import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
+const { expect } = require("chai");
+const hre = require("hardhat");
+const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("MockLending", function () {
   // 部署 fixture

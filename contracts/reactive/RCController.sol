@@ -89,6 +89,9 @@ contract RCController is AbstractReactive {
         uint256 indexed topic0
     );
 
+    /// @notice 熔断器触发：连续亏损达到阈值时自动暂停策略
+    event CircuitBreakerTriggered(uint256 indexed consecutiveLosses);
+
     // ─── 常量 ──────────────────────────────────────────────────────────────────
 
     uint256 private constant SEPOLIA_CHAIN_ID = 11155111;
@@ -105,6 +108,9 @@ contract RCController is AbstractReactive {
 
     uint64 private constant CALLBACK_GAS_LIMIT = 1000000;
 
+    /// @notice 连续亏损上限，超过后自动触发熔断暂停
+    uint256 public constant MAX_CONSECUTIVE_LOSSES = 3;
+
     // ─── 状态变量 ──────────────────────────────────────────────────────────────
 
     // Origin 链合约地址
@@ -114,6 +120,7 @@ contract RCController is AbstractReactive {
     // Destination 链合约地址
     address public liquidationExecutor;
     address public arbitrageExecutor;
+    address public mockDexB;  // Destination 链 DEX（套利卖出端）
 
     // 策略参数
     uint256 public liquidationHealthFactorThreshold;  // 1.02e18
@@ -123,6 +130,16 @@ contract RCController is AbstractReactive {
     bool public paused;
     address public owner;
 
+    /// @notice 连续亏损计数，由 owner 通过 recordLoss/recordSuccess 维护
+    uint256 public consecutiveLosses;
+
+    /// @notice 触发清算的最小债务值（18 decimals USD），低于此值跳过以避免 gas > 利润
+    uint256 public minLiqDebtUSD = 10e18; // 默认 $10
+
+    /// @notice Destination DEX 价格缓存（USDC/ETH，6 decimals）
+    /// @dev ReactVM staticcall 跨链读取失败时使用此值作为 fallback，避免差价归零
+    uint256 public cachedPriceB;
+
     // ─── 构造函数 ──────────────────────────────────────────────────────────────
 
     constructor(
@@ -130,6 +147,7 @@ contract RCController is AbstractReactive {
         address _mockDexA,
         address _liquidationExecutor,
         address _arbitrageExecutor,
+        address _mockDexB,
         uint256 _healthFactorThreshold,
         uint256 _spreadThreshold
     ) payable {
@@ -137,10 +155,12 @@ contract RCController is AbstractReactive {
         mockDexA = _mockDexA;
         liquidationExecutor = _liquidationExecutor;
         arbitrageExecutor = _arbitrageExecutor;
+        mockDexB = _mockDexB;
         liquidationHealthFactorThreshold = _healthFactorThreshold;
         arbitrageSpreadThreshold = _spreadThreshold;
         owner = msg.sender;
         paused = false;
+        consecutiveLosses = 0;
 
         // 订阅事件（仅在非 ReactVM 模式下）
         if (!vm) {
@@ -190,14 +210,21 @@ contract RCController is AbstractReactive {
      */
     function _handleHealthFactorUpdate(LogRecord calldata log) internal {
         // 解析事件数据
-        // event HealthFactorUpdated(address user, uint256 healthFactor, uint256 totalCollateral, uint256 totalDebt)
+        // event HealthFactorUpdated(address indexed user, uint256 healthFactor, uint256 totalCollateral, uint256 totalDebt)
+        // indexed 字段在 topics 中，data 只含三个 uint256
         address user = address(uint160(log.topic_1));
-        (uint256 healthFactor, uint256 totalCollateral, uint256 totalDebt) =
+        (uint256 healthFactor, , uint256 totalDebt) =
             abi.decode(log.data, (uint256, uint256, uint256));
 
         // 检查是否满足清算条件
         if (healthFactor >= liquidationHealthFactorThreshold) {
             return; // 健康度正常，不触发
+        }
+
+        // Gas 成本检查：债务过小时跳过，避免 gas > 利润
+        // totalDebt 为 18 decimals USD 格式，minLiqDebtUSD 同单位
+        if (totalDebt < minLiqDebtUSD) {
+            return;
         }
 
         emit LiquidationTriggered(user, healthFactor, totalDebt);
@@ -223,32 +250,63 @@ contract RCController is AbstractReactive {
      * @notice 处理 Swap 事件
      */
     function _handleSwapEvent(LogRecord calldata log) internal {
-        // 解析事件数据
-        // event Swap(address user, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut, uint256 newPrice)
-        (, , , , , uint256 newPrice) = abi.decode(
-            log.data,
-            (address, address, address, uint256, uint256, uint256)
-        );
+        // event Swap(address indexed user, address indexed tokenIn, address indexed tokenOut,
+        //            uint256 amountIn, uint256 amountOut, uint256 newPrice)
+        // indexed 字段在 topics 中，data 只含三个 uint256
+        (, , uint256 newPrice) = abi.decode(log.data, (uint256, uint256, uint256));
 
-        // 简化：假设 Destination 链价格固定为 3050 USDC
-        uint256 priceB = 3050e6;
+        // 优先使用管理员缓存的 DexB 价格，再尝试 staticcall 实时覆盖
+        // 避免 staticcall 跨链失败时 priceB = newPrice 导致差价归零
+        uint256 priceB = cachedPriceB;
+        (bool ok, bytes memory ret) = mockDexB.staticcall(
+            abi.encodeWithSignature("getPrice()")
+        );
+        if (ok && ret.length == 32) {
+            priceB = abi.decode(ret, (uint256));
+        }
+        if (priceB == 0) return; // 无价格信息，跳过
+
         uint256 spreadPct = _calculateSpread(newPrice, priceB);
 
         if (spreadPct < arbitrageSpreadThreshold) {
             return; // 价差不足，不触发
         }
 
+        // Gas 成本检查：预期利润必须超过 gas 估算
+        uint256 amountIn = 1e16; // 0.01 ETH（保守仓位，节省测试资金）
+        uint256 expectedProfitWei = (amountIn * spreadPct) / 10000;
+        uint256 gasEstimateWei = uint256(CALLBACK_GAS_LIMIT) * tx.gasprice;
+        if (expectedProfitWei <= gasEstimateWei) {
+            return; // gas 成本超过预期利润，不触发
+        }
+
         emit ArbitrageTriggered(newPrice, priceB, spreadPct);
 
-        // 触发 Destination 链执行套利
+        // 根据价格方向确定套利方向
+        // newPrice  = Origin DEX 当前价格（USDC per ETH）
+        // priceB    = Destination DEX 当前价格
+        address tokenIn;
+        address tokenOut;
+        if (newPrice <= priceB) {
+            // Origin DEX 更便宜：Executor 在 Destination DEX（高价）卖出 ETH 换 USDC
+            tokenIn = address(0);   // ETH
+            tokenOut = address(1);  // USDC
+        } else {
+            // Destination DEX 更便宜：Executor 在 Destination DEX（低价）买入 ETH
+            tokenIn = address(1);   // USDC
+            tokenOut = address(0);  // ETH
+        }
+
+        uint256 minProfit = (amountIn * arbitrageSpreadThreshold) / 20000; // 50% 价差作为最低利润
+
         bytes memory payload = abi.encodeWithSignature(
             "executeArbitrage(address,address,address,address,uint256,uint256)",
             mockDexA,
-            address(0), // Destination DEX（需要配置）
-            address(0), // tokenIn
-            address(0), // tokenOut
-            1e18,       // amountIn（示例）
-            0           // minProfit
+            mockDexB,
+            tokenIn,
+            tokenOut,
+            amountIn,
+            minProfit
         );
 
         emit Callback(
@@ -260,9 +318,13 @@ contract RCController is AbstractReactive {
     }
 
     /**
-     * @notice 计算价差（basis points）
+     * @notice 计算价差（basis points，1% = 100）
      */
     function _calculateSpread(uint256 priceA, uint256 priceB) internal pure returns (uint256) {
+        if (priceA == 0 || priceB == 0) {
+            return 0;
+        }
+
         if (priceA > priceB) {
             return ((priceA - priceB) * 10000) / priceB;
         } else {
@@ -281,6 +343,20 @@ contract RCController is AbstractReactive {
         arbitrageSpreadThreshold = newSpreadThreshold;
     }
 
+    function updateExecutors(
+        address newLiquidationExecutor,
+        address newArbitrageExecutor
+    ) external {
+        require(msg.sender == owner, "Only owner");
+        liquidationExecutor = newLiquidationExecutor;
+        arbitrageExecutor = newArbitrageExecutor;
+    }
+
+    function updateMockDexB(address newMockDexB) external {
+        require(msg.sender == owner, "Only owner");
+        mockDexB = newMockDexB;
+    }
+
     function pause() external {
         require(msg.sender == owner, "Only owner");
         paused = true;
@@ -289,5 +365,58 @@ contract RCController is AbstractReactive {
     function unpause() external {
         require(msg.sender == owner, "Only owner");
         paused = false;
+    }
+
+    // ─── 熔断机制（Circuit Breaker）────────────────────────────────────────────
+
+    /**
+     * @notice 记录一次执行亏损。
+     * @dev 由 owner 根据链下监控结果调用（监控 Destination 链 Executor 的失败事件）。
+     *      连续亏损达到 MAX_CONSECUTIVE_LOSSES 时自动暂停策略。
+     */
+    function recordLoss() external {
+        require(msg.sender == owner, "Only owner");
+        consecutiveLosses++;
+        if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
+            paused = true;
+            emit CircuitBreakerTriggered(consecutiveLosses);
+        }
+    }
+
+    /**
+     * @notice 记录一次执行成功，重置连续亏损计数。
+     */
+    function recordSuccess() external {
+        require(msg.sender == owner, "Only owner");
+        consecutiveLosses = 0;
+    }
+
+    /**
+     * @notice 手动重置熔断器并恢复运行。
+     * @dev 在排查根因并确认安全后调用。
+     */
+    function resetCircuitBreaker() external {
+        require(msg.sender == owner, "Only owner");
+        consecutiveLosses = 0;
+        paused = false;
+    }
+
+    /**
+     * @notice 更新清算最小债务门槛（用于 gas 成本保护）。
+     * @param newMinDebtUSD 新的最小债务值（18 decimals USD 格式）
+     */
+    function updateMinLiqDebt(uint256 newMinDebtUSD) external {
+        require(msg.sender == owner, "Only owner");
+        minLiqDebtUSD = newMinDebtUSD;
+    }
+
+    /**
+     * @notice 更新 Destination DEX 价格缓存（USDC/ETH，6 decimals）
+     * @dev 部署后由脚本调用，设置 DexB 的参考价格，确保套利差价计算正确
+     * @param price 新的价格，例如 3050e6 表示 3050 USDC/ETH
+     */
+    function updateCachedPriceB(uint256 price) external {
+        require(msg.sender == owner, "Only owner");
+        cachedPriceB = price;
     }
 }

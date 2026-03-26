@@ -9,7 +9,7 @@
  * 运行方式：node test-local.js
  */
 
-import hre from "hardhat";
+const hre = require("hardhat");
 
 console.log("\n🧪 本地测试开始\n");
 console.log("=".repeat(60));

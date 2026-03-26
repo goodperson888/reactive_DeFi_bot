@@ -1,139 +1,162 @@
-# 环境配置指南
+# .env 文件配置指南
 
-本文档对应当前仓库代码，重点说明 `.env` 中哪些变量给哪些脚本使用。
+## 📋 必填项
 
-## 一、必须配置的变量
+### 1. PRIVATE_KEY（部署账户私钥）
 
-### 1. `PRIVATE_KEY`
+**获取方式：**
 
-部署脚本和新的多链演示脚本优先使用这个变量。
+#### 方法 A：从 MetaMask 导出（推荐用测试账户）
 
-格式示例：
+1. 打开 MetaMask
+2. 点击右上角三个点 → 账户详情
+3. 点击"导出私钥"
+4. 输入密码
+5. 复制私钥（格式：`0x...`）
 
+⚠️ **安全提示：**
+- 永远不要用主账户的私钥
+- 建议创建一个新的测试账户
+- 只在测试网使用
+
+#### 方法 B：生成新的测试账户
+
+```bash
+# 使用 Hardhat 生成
+npx hardhat console
+> const wallet = ethers.Wallet.createRandom()
+> console.log("地址:", wallet.address)
+> console.log("私钥:", wallet.privateKey)
+```
+
+**填入 .env：**
 ```bash
 PRIVATE_KEY=0x你的64位十六进制私钥
 ```
 
-建议：
+---
 
-- 只使用测试网私钥
-- 不要使用主网大额账户私钥
-- 不要把真实私钥提交到 Git
+### 2. RPC URLs（节点地址）
 
-### 2. `SEPOLIA_RPC_URL`
+#### SEPOLIA_RPC_URL
 
-部署脚本和配置文件读取的 Sepolia RPC。
+**选项 A：Infura（推荐）**
 
-可用示例：
-
-```bash
-SEPOLIA_RPC_URL=https://rpc.sepolia.org
-```
-
-或：
+1. 访问 https://infura.io/
+2. 注册账号（免费）
+3. 创建新项目
+4. 复制 Sepolia 的 HTTPS 端点
 
 ```bash
 SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/你的PROJECT_ID
 ```
 
-### 3. `BASE_SEPOLIA_RPC_URL`
+**选项 B：Alchemy**
 
-部署脚本和套利演示脚本读取的 Base Sepolia RPC。
+1. 访问 https://www.alchemy.com/
+2. 注册账号
+3. 创建 App，选择 Sepolia
+4. 复制 HTTPS URL
 
-可用示例：
+```bash
+SEPOLIA_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/你的API_KEY
+```
+
+**选项 C：公共 RPC（不稳定，不推荐）**
+
+```bash
+SEPOLIA_RPC_URL=https://rpc.sepolia.org
+```
+
+#### BASE_SEPOLIA_RPC_URL
+
+**选项 A：Alchemy（推荐）**
+
+1. 在 Alchemy 创建 App，选择 Base Sepolia
+2. 复制 HTTPS URL
+
+```bash
+BASE_SEPOLIA_RPC_URL=https://base-sepolia.g.alchemy.com/v2/你的API_KEY
+```
+
+**选项 B：公共 RPC**
 
 ```bash
 BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 ```
 
-### 4. `REACTIVE_RPC_URL`
+#### REACTIVE_RPC_URL
 
-Reactive Network RPC，当前项目按 `lasna` 语义使用。
-
-默认示例：
+**已有默认值，无需修改：**
 
 ```bash
-REACTIVE_RPC_URL=https://lasna-rpc.rnk.dev/
+REACTIVE_RPC_URL=https://kopli-rpc.rkt.ink
 ```
 
-## 二、Hardhat 兼容变量
+如果官方有其他节点，可以替换。
 
-当前 `hardhat.config.js` 仍会读取旧命名，因此如果你要运行带 `--network ...` 的 Hardhat 命令，建议同时配置下面这组：
+---
 
-### 1. `SEPOLIA_URL`
+### 3. 区块浏览器 API Key（用于合约验证）
 
-```bash
-SEPOLIA_URL=https://rpc.sepolia.org
-```
+#### ETHERSCAN_API_KEY
 
-### 2. `WALLET_KEY1`
-
-```bash
-WALLET_KEY1=0x你的64位十六进制私钥
-```
-
-### 3. `WALLET_KEY2`
-
-第二个账户，可留空：
-
-```bash
-WALLET_KEY2=
-```
-
-### 4. `API_KEY`
-
-当前 `hardhat.config.js` 的验证配置读取的是这个变量。
-
-```bash
-API_KEY=你的API_KEY
-```
-
-## 三、可选变量
-
-### 1. `ETHERSCAN_API_KEY`
+1. 访问 https://etherscan.io/
+2. 注册账号
+3. 进入 https://etherscan.io/myapikey
+4. 创建新的 API Key（免费）
 
 ```bash
 ETHERSCAN_API_KEY=你的API_KEY
 ```
 
-### 2. `BASESCAN_API_KEY`
+#### BASESCAN_API_KEY
+
+1. 访问 https://basescan.org/
+2. 注册账号
+3. 进入 API Keys 页面
+4. 创建新的 API Key
+Access BaseScan data with Etherscan API V2
+API access for data on BASE is provided through Etherscan API V2. A single API key can be used to query data for BASE and more than 60 other EVM chains.
+那就不用单独注册 Basescan 了，直接用 Etherscan 的 key 就行。
 
 ```bash
 BASESCAN_API_KEY=你的API_KEY
 ```
 
-### 3. 已部署地址
+⚠️ **注意：** 如果不需要验证合约，可以留空。
 
-这些变量通常不需要手填，运行部署脚本后会自动回填：
+---
 
-```bash
-MOCK_LENDING_ADDRESS=
-MOCK_DEX_A_ADDRESS=
-MOCK_DEX_B_ADDRESS=
-LIQUIDATION_EXECUTOR_ADDRESS=
-ARBITRAGE_EXECUTOR_ADDRESS=
-RC_CONTROLLER_ADDRESS=
-```
-
-## 四、推荐模板
+## 📝 完整示例
 
 ```bash
+# ══════════════════════════════════════════════
+# 环境模式
+# ══════════════════════════════════════════════
 MODE=mock
 
-PRIVATE_KEY=0x你的私钥
+# ══════════════════════════════════════════════
+# 钱包私钥（测试账户）
+# ══════════════════════════════════════════════
+PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 
-SEPOLIA_RPC_URL=https://rpc.sepolia.org
-BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
-REACTIVE_RPC_URL=https://lasna-rpc.rnk.dev/
+# ══════════════════════════════════════════════
+# RPC 节点
+# ══════════════════════════════════════════════
+SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/你的PROJECT_ID
+BASE_SEPOLIA_RPC_URL=https://base-sepolia.g.alchemy.com/v2/你的API_KEY
+REACTIVE_RPC_URL=https://kopli-rpc.rkt.ink
 
-SEPOLIA_URL=https://rpc.sepolia.org
-WALLET_KEY1=0x你的私钥
-WALLET_KEY2=
+# ══════════════════════════════════════════════
+# 区块浏览器 API Key（可选）
+# ══════════════════════════════════════════════
+ETHERSCAN_API_KEY=你的KEY
+BASESCAN_API_KEY=你的KEY
 
-ETHERSCAN_API_KEY=
-BASESCAN_API_KEY=
-API_KEY=
-
+# ══════════════════════════════════════════════
+# 已部署合约地址（部署后自动填入）
+# ══════════════════════════════════════════════
 MOCK_LENDING_ADDRESS=
 MOCK_DEX_A_ADDRESS=
 MOCK_DEX_B_ADDRESS=
@@ -142,48 +165,84 @@ ARBITRAGE_EXECUTOR_ADDRESS=
 RC_CONTROLLER_ADDRESS=
 ```
 
-## 五、命令对应关系
+---
 
-### 1. 本地测试
+## 💰 获取测试币
+
+部署合约需要 gas，你需要在测试网获取免费的测试币。
+
+### Sepolia ETH
+
+**水龙头列表：**
+1. https://sepoliafaucet.com/
+2. https://www.alchemy.com/faucets/ethereum-sepolia
+3. https://faucet.quicknode.com/ethereum/sepolia
+
+**使用方式：**
+1. 复制你的钱包地址
+2. 粘贴到水龙头网站
+3. 完成验证（可能需要 Twitter 或 GitHub 账号）
+4. 等待几分钟，测试币会到账
+
+### Base Sepolia ETH
+
+**水龙头：**
+1. https://www.alchemy.com/faucets/base-sepolia
+2. 先在 Sepolia 领 ETH，然后通过 Base 官方桥跨链
+
+### Reactive Network REACT
+
+**水龙头：**
+- 需要你自己搜索 "Reactive Network faucet" 或查看官方文档
+- 比赛方应该会提供水龙头链接
+
+---
+
+## ✅ 验证配置
+
+配置完成后，运行以下命令验证：
 
 ```bash
-npx hardhat test
+# 检查账户余额（Sepolia）
+npx hardhat run scripts/check-balance.js --network sepolia
+
+# 检查账户余额（Base Sepolia）
+npx hardhat run scripts/check-balance.js --network base_sepolia
 ```
 
-### 2. 部署
+如果看到余额 > 0，说明配置成功！
 
-部署脚本会直接读取 `.env` 中的 RPC 和私钥：
+---
 
-```bash
-MODE=mock npx hardhat run scripts/deploy/deploy-all.js
-```
+## 🔒 安全提示
 
-### 3. 清算演示
+1. **永远不要提交 .env 到 Git**
+   - 已经在 .gitignore 里了，但要确认
 
-这个脚本仍依赖 Hardhat 的 `sepolia` network：
+2. **不要在公共场合分享私钥**
+   - 截图时注意遮挡
 
-```bash
-npx hardhat run scripts/tasks/demo-liquidation.js --network sepolia
-```
+3. **测试网和主网分开**
+   - 主网私钥永远不要用在测试环境
 
-### 4. 套利演示
+4. **定期轮换 API Key**
+   - 如果泄露，立即重新生成
 
-这个脚本已改为直接使用 `.env` 里的多链 RPC：
+---
 
-```bash
-npx hardhat run scripts/tasks/demo-arbitrage.js
-```
+## ❓ 常见问题
 
-### 5. 合约验证
+**Q: 我没有 MetaMask，怎么办？**
+A: 用方法 B 生成新账户，或者安装 MetaMask（推荐）
 
-```bash
-npx hardhat verify --network sepolia <合约地址> <构造参数>
-npx hardhat verify --network base_sepolia <合约地址> <构造参数>
-```
+**Q: Infura/Alchemy 要收费吗？**
+A: 免费额度足够测试使用，不需要付费
 
-## 六、注意事项
+**Q: 测试币领不到怎么办？**
+A: 多试几个水龙头，或者在 Discord/Telegram 社区求助
 
-- `lasna` 就是当前项目里使用的 Reactive 网络名
-- `base_sepolia` 是当前 `hardhat.config.js` 中的 Base Sepolia 网络名
-- 文档里不再使用不存在的 `scripts/check-balance.js`
-- `.env` 已被 `.gitignore` 忽略，但仍然不要把私钥泄露给他人
+**Q: 部署失败提示 "insufficient funds"？**
+A: 账户余额不足，去水龙头领更多测试币
+
+**Q: RPC 连接超时？**
+A: 换一个 RPC 提供商，或检查网络连接

@@ -1,69 +1,100 @@
 /**
- * Arbitrage demo script.
- *
- * It talks to origin and destination chains through dedicated RPC providers
- * instead of relying on `hre.changeNetwork()`.
+ * Demo script - simulate arbitrage trigger flow.
+ * 1) Set different prices on origin and destination MockDEX
+ * 2) Execute swap on origin to emit Swap event
  */
 
-import hre from "hardhat";
-import { ethers } from "ethers";
-import { CONTRACTS, CHAINS } from "../../config/index.js";
+const fs = require("fs");
+const path = require("path");
+const { ethers } = require("ethers");
+const { CONTRACTS, CHAINS } = require("../../config/index.js");
 
-const DEMO_KEY = process.env.WALLET_KEY1 || process.env.PRIVATE_KEY || "";
+function getProjectRoot() {
+  return path.resolve(__dirname, "../..");
+}
 
-function requireValue(label, value) {
-  if (!value) {
-    throw new Error(`Missing required config: ${label}`);
+function getArtifact(contractFile, contractName) {
+  const artifactPath = path.join(
+    getProjectRoot(),
+    "artifacts",
+    "contracts",
+    contractFile,
+    `${contractName}.json`
+  );
+  if (!fs.existsSync(artifactPath)) {
+    throw new Error(`Artifact not found: ${artifactPath}. Run: npx hardhat compile`);
+  }
+  return JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+}
+
+function getWallet(rpcUrl) {
+  const raw = process.env.WALLET_KEY1 || process.env.PRIVATE_KEY;
+  if (!raw) {
+    throw new Error("Missing WALLET_KEY1 or PRIVATE_KEY in .env");
+  }
+  const privateKey = raw.startsWith("0x") ? raw : `0x${raw}`;
+  return new ethers.Wallet(privateKey, new ethers.JsonRpcProvider(rpcUrl));
+}
+
+function saveTransaction(type, description, txHash) {
+  const transactionsPath = path.join(process.cwd(), "TRANSACTIONS.md");
+  let content = "";
+
+  if (fs.existsSync(transactionsPath)) {
+    content = fs.readFileSync(transactionsPath, "utf8");
   }
 
-  return value;
-}
+  const timestamp = new Date().toISOString();
+  const entry = `- [${timestamp}] **${type}**: ${description}\n  - 交易哈希: \`${txHash}\`\n`;
 
-function getWallet(label, rpcUrl) {
-  requireValue("WALLET_KEY1 or PRIVATE_KEY", DEMO_KEY);
-  requireValue(`${label} RPC`, rpcUrl);
-  return new ethers.Wallet(DEMO_KEY, new ethers.JsonRpcProvider(rpcUrl));
-}
+  const typePattern = new RegExp(`^### ${type}$`, "m");
+  if (!typePattern.test(content)) {
+    content += `\n### ${type}\n\n${entry}`;
+  } else {
+    content = content.replace(typePattern, `### ${type}\n\n${entry}`);
+  }
 
-async function getMockDex(address, signer) {
-  requireValue("MockDEX address", address);
-  const artifact = await hre.artifacts.readArtifact("MockDEX");
-  return new ethers.Contract(address, artifact.abi, signer);
+  fs.writeFileSync(transactionsPath, content);
+  console.log("  Transaction saved to TRANSACTIONS.md");
 }
 
 async function main() {
-  console.log("\nArbitrage demo\n");
+  console.log("\nArbitrage demo script\n");
   console.log("=".repeat(60));
 
-  const originSigner = getWallet("Sepolia", CHAINS.origin.rpc);
-  const destinationSigner = getWallet("Base Sepolia", CHAINS.destination.rpc);
-  console.log(`\nUsing account: ${originSigner.address}\n`);
+  if (!CONTRACTS.origin.mockDexA || !CONTRACTS.destination.mockDexB) {
+    throw new Error("Missing mock DEX addresses in .env. Run deployment first.");
+  }
 
-  const mockDexA = await getMockDex(CONTRACTS.origin.mockDexA, originSigner);
-  const mockDexB = await getMockDex(CONTRACTS.destination.mockDexB, destinationSigner);
+  const originWallet = getWallet(CHAINS.origin.rpc);
+  const destinationWallet = getWallet(CHAINS.destination.rpc);
+  console.log(`Origin wallet: ${originWallet.address}`);
+  console.log(`Destination wallet: ${destinationWallet.address}`);
 
-  console.log("Step 1: Set price difference across chains");
+  const mockDexAbi = getArtifact("mocks/MockDEX.sol", "MockDEX").abi;
+  const mockDexA = new ethers.Contract(CONTRACTS.origin.mockDexA, mockDexAbi, originWallet);
+  const mockDexB = new ethers.Contract(CONTRACTS.destination.mockDexB, mockDexAbi, destinationWallet);
 
-  console.log("  -> Origin DEX price: 3000 USDC/ETH");
+  console.log("\nStep 1: set cross-chain price spread");
+  // Origin DexA: 3000 USDC/ETH（便宜，用户在此买入 ETH）
+  // Destination DexB: 3050 USDC/ETH（贵，套利者在此卖出 ETH 获利）
+  // 差价 1.67% > RCController 阈值 1.5% → 触发套利
   await (await mockDexA.setPrice(3000e6)).wait();
-
-  console.log("  -> Destination DEX price: 3050 USDC/ETH");
   await (await mockDexB.setPrice(3050e6)).wait();
-
   const priceA = await mockDexA.getPrice();
   const priceB = await mockDexB.getPrice();
   const spread = ((Number(priceB) - Number(priceA)) / Number(priceA)) * 100;
-  console.log(`  Spread: ${spread.toFixed(2)}%`);
+  console.log(`  Origin DexA price:      ${Number(priceA) / 1e6} USDC/ETH`);
+  console.log(`  Destination DexB price: ${Number(priceB) / 1e6} USDC/ETH`);
+  console.log(`  Price spread: ${spread.toFixed(2)}% (threshold: 1.5%)`);
+  console.log(`  → Spread > threshold: arbitrage will be triggered by RC`);
 
-  console.log("\nStep 2: Execute origin-chain swap");
-  const swapTx = await mockDexA.swapETHForUSDC({
-    value: ethers.parseEther("0.01"),
-  });
+  console.log("\nStep 2: trigger origin Swap event");
+  const swapTx = await mockDexA.swapETHForUSDC({ value: ethers.parseEther("0.001") });
   const receipt = await swapTx.wait();
-  console.log("  Swap complete");
+  console.log(`  Swap tx: ${swapTx.hash}`);
 
-  console.log("\nStep 3: Parse Swap event");
-  const events = receipt.logs
+  const parsed = receipt.logs
     .map((log) => {
       try {
         return mockDexA.interface.parseLog(log);
@@ -71,29 +102,21 @@ async function main() {
         return null;
       }
     })
-    .filter((event) => event && event.name === "Swap");
+    .filter((item) => item && item.name === "Swap");
 
-  if (events.length > 0) {
-    const event = events[0];
-    console.log("  Swap event detected");
-    console.log(`    User: ${event.args.user}`);
-    console.log(`    In: ${ethers.formatEther(event.args.amountIn)} ETH`);
-    console.log(`    Out: ${Number(event.args.amountOut) / 1e6} USDC`);
-    console.log(`    Price: ${Number(event.args.newPrice) / 1e6} USDC/ETH`);
+  if (parsed.length > 0) {
+    const e = parsed[0];
+    console.log("  Swap event parsed:");
+    console.log(`    user: ${e.args.user}`);
+    console.log(`    amountIn: ${ethers.formatEther(e.args.amountIn)} ETH`);
+    console.log(`    amountOut: ${Number(e.args.amountOut) / 1e6} USDC`);
+    console.log(`    newPrice: ${Number(e.args.newPrice) / 1e6} USDC/ETH`);
   }
 
-  console.log("\n" + "=".repeat(60));
-  console.log("\nDemo complete\n");
-  console.log("Next expected flow:");
-  console.log("  1. RCController listens for Swap");
-  console.log("  2. It detects sufficient spread");
-  console.log("  3. It triggers ArbitrageExecutor on Base Sepolia");
-  console.log(`\nSwap tx: ${swapTx.hash}\n`);
+  saveTransaction("Arbitrage Demo - Swap", "Swap on origin chain to trigger arbitrage flow", swapTx.hash);
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

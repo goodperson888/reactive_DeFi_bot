@@ -1,4 +1,4 @@
-import hre from "hardhat";
+const hre = require("hardhat");
 
 async function main() {
   console.log("🧪 快速测试 - MockLending 合约\n");

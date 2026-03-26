@@ -11,8 +11,34 @@
  * npx hardhat run scripts/tasks/demo-liquidation.js --network sepolia
  */
 
-import hre from "hardhat";
-import { CONTRACTS } from "../../config/index.js";
+const hre = require("hardhat");
+const fs = require("fs");
+const path = require("path");
+const { CONTRACTS } = require("../../config/index.js");
+
+// 保存交易哈希到文件
+function saveTransaction(type, description, txHash) {
+  const transactionsPath = path.join(process.cwd(), "TRANSACTIONS.md");
+  let content = "";
+
+  if (fs.existsSync(transactionsPath)) {
+    content = fs.readFileSync(transactionsPath, "utf8");
+  }
+
+  const timestamp = new Date().toISOString();
+  const entry = `- [${timestamp}] **${type}**: ${description}\n  - 交易哈希: \`${txHash}\`\n`;
+
+  // 检查是否已有该类型的章节
+  const typePattern = new RegExp(`^### ${type}$`, "m");
+  if (!typePattern.test(content)) {
+    content += `\n### ${type}\n\n${entry}`;
+  } else {
+    content = content.replace(typePattern, `### ${type}\n\n${entry}`);
+  }
+
+  fs.writeFileSync(transactionsPath, content);
+  console.log(`  ✓ 交易已保存到 TRANSACTIONS.md`);
+}
 
 async function main() {
   console.log("\n🎬 清算演示脚本\n");
@@ -39,7 +65,7 @@ async function main() {
   // ─── 步骤 2: 借款 ──────────────────────────────────────────────────────────
 
   console.log("\n📍 步骤 2: 借款 20 USDC");
-  const borrowAmount = 20e6; // 20 USDC (6 decimals)
+  const borrowAmount = 20e6; // 20 USDC (6 decimals)（与 0.01 ETH 抵押品匹配，初始 HF=1.2）
   const borrowTx = await mockLending.borrow(borrowAmount);
   await borrowTx.wait();
   console.log("  ✓ 借款成功");
@@ -97,6 +123,12 @@ async function main() {
   console.log(`  存入: ${depositTx.hash}`);
   console.log(`  借款: ${borrowTx.hash}`);
   console.log(`  降价: ${setPriceTx.hash}\n`);
+
+  // 保存交易哈希到文件
+  console.log("💾 保存交易记录到 TRANSACTIONS.md...");
+  saveTransaction("清算演示 - 存入抵押品", "存入 0.01 ETH 作为抵押品", depositTx.hash);
+  saveTransaction("清算演示 - 借款", "借款 20 USDC", borrowTx.hash);
+  saveTransaction("清算演示 - 降价", "降低 ETH 价格（3000 → 2400）触发清算", setPriceTx.hash);
 }
 
 main()
@@ -105,3 +137,4 @@ main()
     console.error(error);
     process.exit(1);
   });
+  

@@ -1,180 +1,212 @@
 /**
- * Deployment script for the full mock flow.
+ * Full deployment script for:
+ * 1) Origin chain (sepolia): MockLending + MockDEX(A)
+ * 2) Destination chain (base_sepolia): MockDEX(B) + Executors
+ * 3) Reactive chain (lasna): RCController
  *
- * It deploys contracts directly with per-chain RPC providers instead of
- * relying on `hre.changeNetwork()`, which is not available in this project.
+ * This script uses plain ethers providers and does not rely on hre.changeNetwork().
  */
 
-import hre from "hardhat";
-import fs from "fs";
-import path from "path";
-import { ethers } from "ethers";
-import { MODE, CHAINS, STRATEGY } from "../../config/index.js";
+const fs = require("fs");
+const path = require("path");
+const { ethers } = require("ethers");
+const { MODE, CHAINS } = require("../../config/index.js");
 
 const deployments = {};
-const DEPLOYER_KEY = process.env.WALLET_KEY1 || process.env.PRIVATE_KEY || "";
 
-function requireValue(label, value) {
-  if (!value) {
-    throw new Error(`Missing required config: ${label}`);
-  }
-
-  return value;
+function getProjectRoot() {
+  return path.resolve(__dirname, "../..");
 }
 
-function getWallet(label, rpcUrl) {
-  requireValue("WALLET_KEY1 or PRIVATE_KEY", DEPLOYER_KEY);
-  requireValue(`${label} RPC`, rpcUrl);
-  const wallet = new ethers.Wallet(DEPLOYER_KEY, new ethers.JsonRpcProvider(rpcUrl));
+function getArtifact(contractFile, contractName) {
+  const artifactPath = path.join(
+    getProjectRoot(),
+    "artifacts",
+    "contracts",
+    contractFile,
+    `${contractName}.json`
+  );
+  if (!fs.existsSync(artifactPath)) {
+    throw new Error(`Artifact not found: ${artifactPath}. Run: npx hardhat compile`);
+  }
+  return JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+}
+
+function getWallet(rpcUrl) {
+  const raw = process.env.WALLET_KEY1 || process.env.PRIVATE_KEY;
+  if (!raw) {
+    throw new Error("Missing WALLET_KEY1 or PRIVATE_KEY in .env");
+  }
+  const privateKey = raw.startsWith("0x") ? raw : `0x${raw}`;
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const wallet = new ethers.Wallet(privateKey, provider);
+  // NonceManager 在本地维护 nonce 计数，避免多链公共 RPC 负载均衡节点间同步延迟导致 NONCE_EXPIRED
   return new ethers.NonceManager(wallet);
 }
 
-async function getFactory(contractName, signer) {
-  const artifact = await hre.artifacts.readArtifact(contractName);
-  return new ethers.ContractFactory(artifact.abi, artifact.bytecode, signer);
-}
-
-async function deploy(contractName, signer, args = [], overrides = {}) {
-  const factory = await getFactory(contractName, signer);
+async function deployContract(wallet, contractFile, contractName, args = [], overrides = {}) {
+  const artifact = getArtifact(contractFile, contractName);
+  const factory = new ethers.ContractFactory(artifact.abi, artifact.bytecode, wallet);
   const contract = await factory.deploy(...args, overrides);
   await contract.waitForDeployment();
   return contract;
 }
 
-function getLiquidationThreshold() {
-  return ethers.parseUnits(String(STRATEGY.liquidation.healthFactorThreshold), 18);
-}
-
-function getArbitrageSpreadBps() {
-  return Math.round(Number(STRATEGY.arbitrage.spreadThreshold) * 100);
-}
-
-async function main() {
-  console.log(`\nStarting deployment, mode: ${MODE}\n`);
-  console.log("=".repeat(60));
-
-  const originSigner = getWallet("Sepolia", CHAINS.origin.rpc);
-  const destinationSigner = getWallet("Base Sepolia", CHAINS.destination.rpc);
-  const reactiveSigner = getWallet("Reactive (lasna)", CHAINS.reactive.rpc);
-  const destinationAddress = await destinationSigner.getAddress();
-  const liquidationThreshold = getLiquidationThreshold();
-  const arbitrageSpreadBps = getArbitrageSpreadBps();
-
-  console.log(`Configured liquidation health factor threshold: ${STRATEGY.liquidation.healthFactorThreshold}`);
-  console.log(`Configured arbitrage spread threshold: ${STRATEGY.arbitrage.spreadThreshold}% (${arbitrageSpreadBps} bps)\n`);
-
-  console.log("\nStep 1/4: Deploy origin contracts on Sepolia\n");
-
-  console.log("  -> Deploying MockLending...");
-  const mockLending = await deploy("MockLending", originSigner);
-  const mockLendingAddr = await mockLending.getAddress();
-  console.log(`     MockLending: ${mockLendingAddr}`);
-  deployments.MOCK_LENDING_ADDRESS = mockLendingAddr;
-
-  console.log("  -> Deploying MockDEX (origin)...");
-  const mockDexA = await deploy("MockDEX", originSigner, [], {
-    // Keep enough origin liquidity for the demo swap while reducing faucet needs.
-    value: ethers.parseEther("0.02"),
-  });
-  const mockDexAAddr = await mockDexA.getAddress();
-  console.log(`     MockDEX (origin): ${mockDexAAddr}`);
-  deployments.MOCK_DEX_A_ADDRESS = mockDexAAddr;
-
-  console.log("\nStep 2/4: Deploy destination contracts on Base Sepolia\n");
-
-  console.log("  -> Deploying MockDEX (destination)...");
-  const mockDexB = await deploy("MockDEX", destinationSigner, [], {
-    // Destination DEX only needs a small seed balance for the current demo flow.
-    value: ethers.parseEther("0.01"),
-  });
-  const mockDexBAddr = await mockDexB.getAddress();
-  console.log(`     MockDEX (destination): ${mockDexBAddr}`);
-  deployments.MOCK_DEX_B_ADDRESS = mockDexBAddr;
-
-  console.log("  -> Deploying LiquidationExecutor...");
-  const liquidationExecutor = await deploy("LiquidationExecutor", destinationSigner, [
-    destinationAddress,
-    ethers.ZeroAddress,
-  ]);
-  const liquidationExecutorAddr = await liquidationExecutor.getAddress();
-  console.log(`     LiquidationExecutor: ${liquidationExecutorAddr}`);
-  deployments.LIQUIDATION_EXECUTOR_ADDRESS = liquidationExecutorAddr;
-
-  console.log("  -> Deploying ArbitrageExecutor...");
-  const arbitrageExecutor = await deploy("ArbitrageExecutor", destinationSigner, [
-    destinationAddress,
-    ethers.ZeroAddress,
-  ]);
-  const arbitrageExecutorAddr = await arbitrageExecutor.getAddress();
-  console.log(`     ArbitrageExecutor: ${arbitrageExecutorAddr}`);
-  deployments.ARBITRAGE_EXECUTOR_ADDRESS = arbitrageExecutorAddr;
-
-  console.log("\nStep 3/4: Deploy RCController on Reactive Network (lasna)\n");
-
-  console.log("  -> Deploying RCController...");
-  const rcController = await deploy("RCController", reactiveSigner, [
-    mockLendingAddr,
-    mockDexAAddr,
-    liquidationExecutorAddr,
-    arbitrageExecutorAddr,
-    liquidationThreshold,
-    arbitrageSpreadBps,
-  ]);
-  const rcControllerAddr = await rcController.getAddress();
-  console.log(`     RCController: ${rcControllerAddr}`);
-  deployments.RC_CONTROLLER_ADDRESS = rcControllerAddr;
-
-  console.log("\nStep 4/4: Update destination executors\n");
-
-  console.log("  -> Updating LiquidationExecutor RC controller...");
-  await (await liquidationExecutor.connect(destinationSigner).updateRCController(rcControllerAddr)).wait();
-  console.log("     LiquidationExecutor updated");
-
-  console.log("  -> Updating ArbitrageExecutor RC controller...");
-  await (await arbitrageExecutor.connect(destinationSigner).updateRCController(rcControllerAddr)).wait();
-  console.log("     ArbitrageExecutor updated");
-
-  console.log("\nSaving deployment addresses to .env\n");
-  saveDeployments();
-
-  console.log("\n" + "=".repeat(60));
-  console.log("\nDeployment complete\n");
-  printSummary();
-}
-
 function saveDeployments() {
-  const envPath = path.join(process.cwd(), ".env");
-  let envContent = fs.readFileSync(envPath, "utf8");
+  const envPath = path.join(getProjectRoot(), ".env");
+  let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
 
   for (const [key, value] of Object.entries(deployments)) {
     const regex = new RegExp(`^${key}=.*$`, "m");
     if (regex.test(envContent)) {
       envContent = envContent.replace(regex, `${key}=${value}`);
     } else {
-      envContent += `\n${key}=${value}`;
+      envContent += `${envContent.endsWith("\n") || envContent.length === 0 ? "" : "\n"}${key}=${value}\n`;
     }
   }
 
   fs.writeFileSync(envPath, envContent);
-  console.log("  .env updated");
 }
 
 function printSummary() {
-  console.log("Deployment summary:\n");
-  console.log("Origin (Sepolia):");
+  console.log("\n=== Deployment Summary ===");
+  console.log("Origin (sepolia):");
   console.log(`  MockLending: ${deployments.MOCK_LENDING_ADDRESS}`);
-  console.log(`  MockDEX: ${deployments.MOCK_DEX_A_ADDRESS}`);
-  console.log("\nDestination (Base Sepolia):");
-  console.log(`  MockDEX: ${deployments.MOCK_DEX_B_ADDRESS}`);
-  console.log(`  LiquidationExecutor: ${deployments.LIQUIDATION_EXECUTOR_ADDRESS}`);
-  console.log(`  ArbitrageExecutor: ${deployments.ARBITRAGE_EXECUTOR_ADDRESS}`);
-  console.log("\nReactive Network (lasna):");
+  console.log(`  MockDEX A:   ${deployments.MOCK_DEX_A_ADDRESS}`);
+
+  console.log("\nDestination (base_sepolia):");
+  console.log(`  MockDEX B:            ${deployments.MOCK_DEX_B_ADDRESS}`);
+  console.log(`  LiquidationExecutor:  ${deployments.LIQUIDATION_EXECUTOR_ADDRESS}`);
+  console.log(`  ArbitrageExecutor:    ${deployments.ARBITRAGE_EXECUTOR_ADDRESS}`);
+
+  console.log("\nReactive (lasna):");
   console.log(`  RCController: ${deployments.RC_CONTROLLER_ADDRESS}`);
+  console.log("\nSaved to .env");
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error(error);
-    process.exit(1);
+async function main() {
+  console.log(`\nStarting deployment. MODE=${MODE}`);
+
+  const originWallet = getWallet(CHAINS.origin.rpc);
+  const destinationWallet = getWallet(CHAINS.destination.rpc);
+  const reactiveWallet = getWallet(CHAINS.reactive.rpc);
+
+  // NonceManager 在 ethers v6 没有同步 .address，使用 getAddress()
+  const originAddr      = await originWallet.getAddress();
+  const destinationAddr = await destinationWallet.getAddress();
+  const reactiveAddr    = await reactiveWallet.getAddress();
+
+  console.log(`Origin deployer: ${originAddr}`);
+  console.log(`Destination deployer: ${destinationAddr}`);
+  console.log(`Reactive deployer: ${reactiveAddr}`);
+
+  // 1) Deploy origin contracts (sepolia)
+  console.log("\n[1/4] Deploying origin contracts on sepolia...");
+  const mockLending = await deployContract(
+    originWallet,
+    "mocks/MockLending.sol",
+    "MockLending"
+  );
+  const mockDexA = await deployContract(
+    originWallet,
+    "mocks/MockDEX.sol",
+    "MockDEX",
+    [],
+    { value: ethers.parseEther("0.02") }
+  );
+  deployments.MOCK_LENDING_ADDRESS = await mockLending.getAddress();
+  deployments.MOCK_DEX_A_ADDRESS = await mockDexA.getAddress();
+  console.log(`  MockLending: ${deployments.MOCK_LENDING_ADDRESS}`);
+  console.log(`  MockDEX A:   ${deployments.MOCK_DEX_A_ADDRESS}`);
+
+  // 2) Deploy destination contracts (base_sepolia)
+  console.log("\n[2/4] Deploying destination contracts on base_sepolia...");
+  const mockDexB = await deployContract(
+    destinationWallet,
+    "mocks/MockDEX.sol",
+    "MockDEX",
+    [],
+    { value: ethers.parseEther("0.02") }
+  );
+  deployments.MOCK_DEX_B_ADDRESS = await mockDexB.getAddress();
+
+  // Set temporary RC controller to destination deployer so we can update later.
+  const liquidationExecutor = await deployContract(
+    destinationWallet,
+    "destination/LiquidationExecutor.sol",
+    "LiquidationExecutor",
+    [destinationAddr, destinationAddr]
+  );
+  const arbitrageExecutor = await deployContract(
+    destinationWallet,
+    "destination/ArbitrageExecutor.sol",
+    "ArbitrageExecutor",
+    [destinationAddr, destinationAddr]
+  );
+
+  deployments.LIQUIDATION_EXECUTOR_ADDRESS = await liquidationExecutor.getAddress();
+  deployments.ARBITRAGE_EXECUTOR_ADDRESS = await arbitrageExecutor.getAddress();
+  console.log(`  MockDEX B:            ${deployments.MOCK_DEX_B_ADDRESS}`);
+  console.log(`  LiquidationExecutor:  ${deployments.LIQUIDATION_EXECUTOR_ADDRESS}`);
+  console.log(`  ArbitrageExecutor:    ${deployments.ARBITRAGE_EXECUTOR_ADDRESS}`);
+
+  // 3) Deploy reactive contract (lasna)
+  console.log("\n[3/4] Deploying RCController on lasna...");
+  const rcController = await deployContract(
+    reactiveWallet,
+    "reactive/RCController.sol",
+    "RCController",
+    [
+      deployments.MOCK_LENDING_ADDRESS,
+      deployments.MOCK_DEX_A_ADDRESS,
+      deployments.LIQUIDATION_EXECUTOR_ADDRESS,
+      deployments.ARBITRAGE_EXECUTOR_ADDRESS,
+      deployments.MOCK_DEX_B_ADDRESS,
+      ethers.parseUnits("1.02", 18),
+      150
+    ]
+  );
+  deployments.RC_CONTROLLER_ADDRESS = await rcController.getAddress();
+  console.log(`  RCController: ${deployments.RC_CONTROLLER_ADDRESS}`);
+
+  // 注意：cachedPriceB 通过 demo-arbitrage.js 的 setPrice 直接在 MockDEX B 上设置
+  // updateCachedPriceB 已从当前版本 RCController 中移除，无需在此调用
+
+  // 4) Update executors to trust RC controller
+  console.log("\n[4/4] Updating executor RC controller addresses on base_sepolia...");
+  const liqExecutorAtDest = new ethers.Contract(
+    deployments.LIQUIDATION_EXECUTOR_ADDRESS,
+    getArtifact("destination/LiquidationExecutor.sol", "LiquidationExecutor").abi,
+    destinationWallet
+  );
+  const arbExecutorAtDest = new ethers.Contract(
+    deployments.ARBITRAGE_EXECUTOR_ADDRESS,
+    getArtifact("destination/ArbitrageExecutor.sol", "ArbitrageExecutor").abi,
+    destinationWallet
+  );
+
+  const tx1 = await liqExecutorAtDest.updateRCController(deployments.RC_CONTROLLER_ADDRESS);
+  await tx1.wait();
+  const tx2 = await arbExecutorAtDest.updateRCController(deployments.RC_CONTROLLER_ADDRESS);
+  await tx2.wait();
+  console.log("  Executors updated.");
+
+  // 为 ArbitrageExecutor 注入少量 ETH，供套利演示使用（0.02 ETH）
+  console.log("\n[4b] Funding ArbitrageExecutor on base_sepolia...");
+  const fundTx = await destinationWallet.sendTransaction({
+    to: deployments.ARBITRAGE_EXECUTOR_ADDRESS,
+    value: ethers.parseEther("0.01"),
   });
+  await fundTx.wait();
+  console.log(`  ArbitrageExecutor funded: 0.01 ETH`);
+
+  saveDeployments();
+  printSummary();
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+
+

@@ -5,8 +5,7 @@
  * 直接使用 Hardhat 的本地网络部署和测试合约
  */
 
-import hre from "hardhat";
-import { pathToFileURL } from "url";
+const hre = require("hardhat");
 
 // 测试结果统计
 let passed = 0;
@@ -201,9 +200,6 @@ async function main() {
   }
 }
 
-const isDirectExecution =
-  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-
-if (isDirectExecution) {
+if (require.main === module) {
   main();
 }
