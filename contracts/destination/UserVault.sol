@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import "../interfaces/ISwapRouter.sol";
+import "../interfaces/IWETH.sol";
+import "../interfaces/IERC20.sol";
+
 /**
  * @title UserVault
  * @notice 用户资金管理合约，部署在 Destination 链（Base Sepolia）
@@ -66,6 +70,16 @@ contract UserVault {
     address public owner;
     address public treasury;
     address public rcFactory;
+    address public reactiveCallbackSender; // Reactive Network 回调 sender（测试网/主网）
+
+    // ─── 协议模式 ────────────────────────────────────────────────────────────
+    uint8 public protocolMode;  // 0=mock（模拟结算）, 1=real（真实 Uniswap/Aave 执行）
+
+    // ─── 真实协议地址（protocolMode=1 时使用）────────────────────────────────
+    address public swapRouter;   // Uniswap V3 SwapRouter
+    address public weth;         // WETH 合约
+    address public stableToken;  // 稳定币（USDC）
+    uint24  public swapFeeTier;  // Uniswap V3 手续费档位（500=0.05%, 3000=0.3%, 10000=1%）
 
     uint256 public feeRate = 2000;     // 20% = 2000 basis points
     uint256 public constant FEE_BASE = 10000;
@@ -85,7 +99,9 @@ contract UserVault {
 
     modifier onlyRC(address user) {
         require(
-            msg.sender == positions[user].rcAddress || msg.sender == rcFactory,
+            msg.sender == positions[user].rcAddress ||
+            msg.sender == rcFactory ||
+            (reactiveCallbackSender != address(0) && msg.sender == reactiveCallbackSender),
             "Only user RC"
         );
         _;
@@ -98,9 +114,10 @@ contract UserVault {
 
     // ─── 构造函数 ──────────────────────────────────────────────────────────────
 
-    constructor(address _treasury) {
+    constructor(address _treasury, address _reactiveCallbackSender) {
         owner = msg.sender;
         treasury = _treasury;
+        reactiveCallbackSender = _reactiveCallbackSender;
     }
 
     // ─── 用户操作 ──────────────────────────────────────────────────────────────
@@ -252,6 +269,11 @@ contract UserVault {
             return false;
         }
 
+        if (protocolMode == 1) {
+            return _executeReal(user, strategyType, amountHint);
+        }
+
+        // ── mock 模式：模拟结算 ──
         (bool enabled, uint256 profitBps) = _resolveStrategySimulation(pos.params, strategyType);
         if (!enabled) {
             _applyExecutionResult(user, strategyType, false, 0, 0);
@@ -263,6 +285,94 @@ contract UserVault {
         if (profit == 0 && executionBase > 0) profit = 1;
 
         _applyExecutionResult(user, strategyType, true, profit, 0);
+        return true;
+    }
+
+    // ─── 真实协议执行（Uniswap V3）─────────────────────────────────────────
+
+    function _executeReal(
+        address user,
+        string calldata strategyType,
+        uint256 amountHint
+    ) internal returns (bool) {
+        Position storage pos = positions[user];
+        uint256 executionBase = _executionBase(pos.balance, pos.params.maxPositionPct, amountHint);
+        if (executionBase == 0) {
+            _applyExecutionResult(user, strategyType, false, 0, 0);
+            return false;
+        }
+
+        // 从用户余额扣除执行金额
+        pos.balance -= executionBase;
+        totalTVL -= executionBase;
+
+        // Wrap ETH → WETH
+        IWETH(weth).deposit{value: executionBase}();
+        IERC20(weth).approve(swapRouter, executionBase);
+
+        // 计算最小输出（滑点保护）
+        uint256 minOut = (executionBase * (100 - pos.params.slippagePct)) / 100;
+
+        // Swap WETH → stableToken
+        uint256 stableReceived;
+        try ISwapRouter(swapRouter).exactInputSingle(
+            ISwapRouter.ExactInputSingleParams({
+                tokenIn: weth,
+                tokenOut: stableToken,
+                fee: swapFeeTier,
+                recipient: address(this),
+                amountIn: executionBase,
+                amountOutMinimum: minOut,
+                sqrtPriceLimitX96: 0
+            })
+        ) returns (uint256 amountOut) {
+            stableReceived = amountOut;
+        } catch {
+            // swap 失败，退回 ETH
+            IWETH(weth).withdraw(executionBase);
+            pos.balance += executionBase;
+            totalTVL += executionBase;
+            _applyExecutionResult(user, strategyType, false, 0, 0);
+            return false;
+        }
+
+        // Swap stableToken → WETH（回程）
+        IERC20(stableToken).approve(swapRouter, stableReceived);
+        uint256 ethBack;
+        try ISwapRouter(swapRouter).exactInputSingle(
+            ISwapRouter.ExactInputSingleParams({
+                tokenIn: stableToken,
+                tokenOut: weth,
+                fee: swapFeeTier,
+                recipient: address(this),
+                amountIn: stableReceived,
+                amountOutMinimum: 0, // 回程不设最小值，避免卡住
+                sqrtPriceLimitX96: 0
+            })
+        ) returns (uint256 amountOut) {
+            ethBack = amountOut;
+        } catch {
+            // 回程失败，保留 stable 作为用户余额��值记录
+            // 简化处理：记为亏损
+            _applyExecutionResult(user, strategyType, false, 0, executionBase);
+            return false;
+        }
+
+        // Unwrap WETH → ETH
+        IWETH(weth).withdraw(ethBack);
+
+        // 计算盈亏
+        if (ethBack >= executionBase) {
+            uint256 profit = ethBack - executionBase;
+            pos.balance += ethBack;
+            totalTVL += ethBack;
+            _applyExecutionResult(user, strategyType, true, profit, 0);
+        } else {
+            uint256 loss = executionBase - ethBack;
+            pos.balance += ethBack;
+            totalTVL += ethBack;
+            _applyExecutionResult(user, strategyType, false, 0, loss);
+        }
         return true;
     }
 
@@ -314,6 +424,10 @@ contract UserVault {
         rcFactory = _rcFactory;
     }
 
+    function setReactiveCallbackSender(address _sender) external onlyOwner {
+        reactiveCallbackSender = _sender;
+    }
+
     function setFeeRate(uint256 _feeRate) external onlyOwner {
         require(_feeRate <= 5000, "Max 50%");
         feeRate = _feeRate;
@@ -325,6 +439,20 @@ contract UserVault {
 
     function updateDefaultParams(StrategyParams calldata params) external onlyOwner {
         defaultParams = params;
+    }
+
+    function setProtocolConfig(
+        uint8 _mode,
+        address _swapRouter,
+        address _weth,
+        address _stableToken,
+        uint24 _swapFeeTier
+    ) external onlyOwner {
+        protocolMode = _mode;
+        swapRouter = _swapRouter;
+        weth = _weth;
+        stableToken = _stableToken;
+        swapFeeTier = _swapFeeTier;
     }
 
     function _applyExecutionResult(

@@ -1,16 +1,51 @@
 import hre from "hardhat";
 import fs from "fs";
 import path from "path";
-import { Contract, ContractFactory, JsonRpcProvider, NonceManager, Wallet, parseEther } from "ethers";
+import { Contract, ContractFactory, JsonRpcProvider, NonceManager, Wallet, parseEther, ZeroAddress, id } from "ethers";
 import { APP_ENV, PROTOCOL_MODE, CHAINS, isLocal } from "../../config/index.js";
 
 const deployments = {};
 const DEFAULT_LOCAL_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 async function main() {
-  if (PROTOCOL_MODE !== "mock") {
-    throw new Error("The per-user frontend flow currently supports PROTOCOL_MODE=mock only.");
-  }
+  const useRealProtocol = PROTOCOL_MODE === "prod" || PROTOCOL_MODE === "real";
+
+  // ─── 事件 Topic（mock vs 真实协议）───────────────────────────────────────
+  const TOPICS = useRealProtocol ? {
+    liquidation: id("LiquidationCall(address,address,address,uint256,uint256,address,bool)"),
+    arbitrage:   id("Swap(address,address,int256,int256,uint160,uint128,int24)"),
+  } : {
+    liquidation: id("HealthFactorUpdated(address,uint256,uint256,uint256)"),
+    arbitrage:   id("Swap(address,address,address,uint256,uint256,uint256)"),
+  };
+
+  // ─── Reactive Network 回调 sender 地址 ──────────────────────────────────
+  const REACTIVE_CALLBACK_SENDERS = {
+    testnet: "0x2afaFD298b23b62760711756088F75B7409f5967",
+    mainnet: "",  // TODO: 主网地址待官方确认
+  };
+
+  // ─── 真实协议地址（Destination 链上的 Uniswap V3）──────────────────────
+  const PROTOCOL_ADDRESSES = {
+    testnet: {
+      swapRouter:  "0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4", // Uniswap V3 SwapRouter - Base Sepolia
+      weth:        "0x4200000000000000000000000000000000000006", // WETH - Base Sepolia
+      stableToken: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // USDC - Base Sepolia
+      swapFeeTier: 3000,
+      // Origin 链真实合约（Sepolia）
+      aavePool:    "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951", // Aave V3 Pool
+      uniswapPool: process.env.UNISWAP_POOL_SEPOLIA || "",        // 需要指定具体监听的池子
+    },
+    mainnet: {
+      swapRouter:  "0x2626664c2603336E57B271c5C0b26F421741e481", // Uniswap V3 SwapRouter - Base
+      weth:        "0x4200000000000000000000000000000000000006", // WETH - Base
+      stableToken: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC - Base
+      swapFeeTier: 500,
+      // Origin 链真实合约（Ethereum）
+      aavePool:    "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", // Aave V3 Pool
+      uniswapPool: process.env.UNISWAP_POOL_MAINNET || "",
+    },
+  };
 
   const privateKey = resolveDeploymentKey();
   if (!privateKey) {
@@ -28,26 +63,35 @@ async function main() {
   const providers = makeProviders();
   const wallets = makeWallets(privateKey, providers);
 
-  const origin = await ensureOriginMocks(artifacts, wallets.sepolia);
-  const userVaultAddress = await deployUserVault(artifacts, wallets.baseSepolia);
+  if (isLocal) await injectMockReactiveService(artifacts);
+
+  const origin = await resolveOriginContracts(artifacts, wallets.sepolia, useRealProtocol, PROTOCOL_ADDRESSES[APP_ENV]);
+  const userVaultAddress = await deployUserVault(artifacts, wallets.baseSepolia, REACTIVE_CALLBACK_SENDERS[APP_ENV] || ZeroAddress);
   const rcFactoryAddress = await deployRCFactory(
     artifacts,
     wallets.reactive,
     userVaultAddress,
-    origin.mockLending,
-    origin.mockDexA,
+    origin.lending,
+    origin.dex,
+    TOPICS,
   );
   await linkVaultToFactory(artifacts, wallets.baseSepolia, userVaultAddress, rcFactoryAddress);
+
+  // 真实协议模式：配置 UserVault 的 Uniswap V3 执行参数
+  if (useRealProtocol && PROTOCOL_ADDRESSES[APP_ENV]) {
+    await configureProtocol(artifacts, wallets.baseSepolia, userVaultAddress, PROTOCOL_ADDRESSES[APP_ENV]);
+  }
 
   saveDeployments();
   syncFrontendEnv();
 
   console.log("\n" + "=".repeat(60));
   console.log("\n✅ 用户前端流部署完成！\n");
-  console.log(`UserVault (Base Sepolia): ${userVaultAddress}`);
-  console.log(`RCFactory (Reactive):     ${rcFactoryAddress}`);
-  console.log(`MockLending (Sepolia):    ${origin.mockLending}`);
-  console.log(`MockDEX A (Sepolia):      ${origin.mockDexA}`);
+  console.log(`  协议模式:    ${useRealProtocol ? "真实 (Aave/Uniswap)" : "Mock"}`);
+  console.log(`  UserVault:   ${userVaultAddress}`);
+  console.log(`  RCFactory:   ${rcFactoryAddress}`);
+  console.log(`  Origin 借贷: ${origin.lending}`);
+  console.log(`  Origin DEX:  ${origin.dex}`);
 }
 
 function resolveDeploymentKey() {
@@ -60,12 +104,16 @@ function resolveDeploymentKey() {
 }
 
 async function loadArtifacts() {
-  return {
+  const artifacts = {
     MockLending: await hre.artifacts.readArtifact("MockLending"),
     MockDEX: await hre.artifacts.readArtifact("MockDEX"),
     UserVault: await hre.artifacts.readArtifact("UserVault"),
     RCFactory: await hre.artifacts.readArtifact("RCFactory"),
   };
+  if (isLocal) {
+    artifacts.MockReactiveService = await hre.artifacts.readArtifact("MockReactiveService");
+  }
+  return artifacts;
 }
 
 function makeProviders() {
@@ -93,42 +141,69 @@ function makeWallets(privateKey, providers) {
   };
 }
 
-async function ensureOriginMocks(artifacts, wallet) {
-  let mockLendingAddress = process.env.MOCK_LENDING_ADDRESS || "";
-  let mockDexAAddress = process.env.MOCK_DEX_A_ADDRESS || "";
+async function injectMockReactiveService(artifacts) {
+  const SERVICE_ADDRESS = "0x0000000000000000000000000000000000fffFfF";
+  const provider = hre.network.provider;
+  const existing = await provider.send("eth_getCode", [SERVICE_ADDRESS, "latest"]);
+  if (existing !== "0x") {
+    console.log("\n📍 MockReactiveService 已存在于 0xfffFfF，跳过注入");
+    return;
+  }
+  console.log("\n📍 注入 MockReactiveService 到 0xfffFfF (本地开发)...");
+  await provider.send("hardhat_setCode", [SERVICE_ADDRESS, artifacts.MockReactiveService.deployedBytecode]);
+  console.log("  ✓ 注入完成");
+}
 
-  if (!mockLendingAddress) {
+async function resolveOriginContracts(artifacts, wallet, useReal, protocolAddrs) {
+  // 真实协议模式：使用已有的 Aave/Uniswap 合约地址
+  if (useReal && protocolAddrs) {
+    const lending = protocolAddrs.aavePool;
+    const dex = protocolAddrs.uniswapPool;
+    if (!lending || !dex) {
+      throw new Error("真实协议模式需要 aavePool 和 uniswapPool 地址，请在 .env 或 PROTOCOL_ADDRESSES 中配置");
+    }
+    console.log(`\n📍 使用真实协议合约:`);
+    console.log(`  Aave V3 Pool:   ${lending}`);
+    console.log(`  Uniswap V3 Pool: ${dex}`);
+    return { lending, dex };
+  }
+
+  // Mock 模式：部署 MockLending / MockDEX
+  let lendingAddr = process.env.MOCK_LENDING_ADDRESS || "";
+  let dexAddr = process.env.MOCK_DEX_A_ADDRESS || "";
+
+  if (!lendingAddr) {
     console.log("\n📍 部署 Origin MockLending...");
     const factory = new ContractFactory(artifacts.MockLending.abi, artifacts.MockLending.bytecode, wallet);
     const contract = await factory.deploy();
     await contract.waitForDeployment();
-    mockLendingAddress = await contract.getAddress();
-    deployments.MOCK_LENDING_ADDRESS = mockLendingAddress;
-    console.log(`  ✓ MockLending: ${mockLendingAddress}`);
+    lendingAddr = await contract.getAddress();
+    deployments.MOCK_LENDING_ADDRESS = lendingAddr;
+    console.log(`  ✓ MockLending: ${lendingAddr}`);
   } else {
-    console.log(`\n📍 复用现有 MockLending: ${mockLendingAddress}`);
+    console.log(`\n📍 复用现有 MockLending: ${lendingAddr}`);
   }
 
-  if (!mockDexAAddress) {
+  if (!dexAddr) {
     console.log("📍 部署 Origin MockDEX...");
     const factory = new ContractFactory(artifacts.MockDEX.abi, artifacts.MockDEX.bytecode, wallet);
     const contract = await factory.deploy({ value: parseEther("0.1") });
     await contract.waitForDeployment();
-    mockDexAAddress = await contract.getAddress();
-    deployments.MOCK_DEX_A_ADDRESS = mockDexAAddress;
-    console.log(`  ✓ MockDEX A: ${mockDexAAddress}`);
+    dexAddr = await contract.getAddress();
+    deployments.MOCK_DEX_A_ADDRESS = dexAddr;
+    console.log(`  ✓ MockDEX A: ${dexAddr}`);
   } else {
-    console.log(`📍 复用现有 MockDEX A: ${mockDexAAddress}`);
+    console.log(`📍 复用现有 MockDEX A: ${dexAddr}`);
   }
 
-  return { mockLending: mockLendingAddress, mockDexA: mockDexAAddress };
+  return { lending: lendingAddr, dex: dexAddr };
 }
 
-async function deployUserVault(artifacts, wallet) {
+async function deployUserVault(artifacts, wallet, callbackSender) {
   console.log("\n📍 部署 UserVault (Base Sepolia)...");
   const factory = new ContractFactory(artifacts.UserVault.abi, artifacts.UserVault.bytecode, wallet);
   const deployerAddress = await wallet.getAddress();
-  const contract = await factory.deploy(deployerAddress);
+  const contract = await factory.deploy(deployerAddress, callbackSender);
   await contract.waitForDeployment();
 
   const address = await contract.getAddress();
@@ -137,16 +212,38 @@ async function deployUserVault(artifacts, wallet) {
   return address;
 }
 
-async function deployRCFactory(artifacts, wallet, userVaultAddress, mockLendingAddress, mockDexAAddress) {
+async function deployRCFactory(artifacts, wallet, userVaultAddress, lendingAddress, dexAddress, topics) {
   console.log("\n📍 部署 RCFactory (Reactive)...");
   const factory = new ContractFactory(artifacts.RCFactory.abi, artifacts.RCFactory.bytecode, wallet);
-  const contract = await factory.deploy(userVaultAddress, mockLendingAddress, mockDexAAddress);
+  const contract = await factory.deploy(
+    userVaultAddress,
+    lendingAddress,
+    dexAddress,
+    CHAINS.origin.chainId,
+    CHAINS.destination.chainId,
+    topics.liquidation,
+    topics.arbitrage
+  );
   await contract.waitForDeployment();
 
   const address = await contract.getAddress();
   deployments.RC_FACTORY_ADDRESS = address;
   console.log(`  ✓ RCFactory: ${address}`);
   return address;
+}
+
+async function configureProtocol(artifacts, wallet, userVaultAddress, protocolAddrs) {
+  console.log("\n📍 配置 UserVault 真实协议参数...");
+  const vault = new Contract(userVaultAddress, artifacts.UserVault.abi, wallet);
+  const tx = await vault.setProtocolConfig(
+    1, // protocolMode = real
+    protocolAddrs.swapRouter,
+    protocolAddrs.weth,
+    protocolAddrs.stableToken,
+    protocolAddrs.swapFeeTier
+  );
+  await tx.wait();
+  console.log(`  ✓ 已配置: SwapRouter=${protocolAddrs.swapRouter}, WETH=${protocolAddrs.weth}, USDC=${protocolAddrs.stableToken}, fee=${protocolAddrs.swapFeeTier}`);
 }
 
 async function linkVaultToFactory(artifacts, wallet, userVaultAddress, rcFactoryAddress) {
@@ -182,7 +279,7 @@ function syncFrontendEnv() {
     `NEXT_PUBLIC_LOCAL_RPC_URL=${process.env.LOCAL_RPC_URL || "http://127.0.0.1:8545"}`,
     `NEXT_PUBLIC_USER_VAULT_ADDRESS=${deployments.USER_VAULT_ADDRESS || process.env.USER_VAULT_ADDRESS || ""}`,
     `NEXT_PUBLIC_RC_FACTORY_ADDRESS=${deployments.RC_FACTORY_ADDRESS || process.env.RC_FACTORY_ADDRESS || ""}`,
-    `NEXT_PUBLIC_REACTIVE_RPC_URL=${process.env.REACTIVE_RPC_URL || "https://kopli-rpc.rkt.ink"}`,
+    `NEXT_PUBLIC_REACTIVE_RPC_URL=${process.env.REACTIVE_RPC_URL || "https://lasna-rpc.rnk.dev/"}`,
     "",
   ].join("\n");
 

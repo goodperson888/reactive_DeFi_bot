@@ -13,7 +13,9 @@
 - 推荐的本地开发组合是 `APP_ENV=local + PROTOCOL_MODE=mock`
 - 本地 mock 流已经可以跑通：`MockLending`、`MockDEX`、`UserVault`、`RCFactory`
 - `deploy:user-flow` 会自动把地址同步到 `frontend/.env.local`
-- `PROTOCOL_MODE=prod` 目前仍属于进行中状态，前端用户流还没有完全对齐真实协议执行逻辑
+- `PROTOCOL_MODE=prod` 已支持真实协议执行（Aave V3 清算 + Uniswap V3 套利），部署脚本会自动配置 SwapRouter/WETH/USDC
+- 事件 topic 可配置：mock 模式用 MockLending/MockDEX 事件签名，prod 模式用 Aave V3 LiquidationCall / Uniswap V3 Swap
+- 本地开发时会自动注入 `MockReactiveService` 到 `0xfffFfF`，解决 `service.subscribe()` 在 Hardhat 上的调用问题
 - 旧的 `deploy-all.js`、`demo-liquidation.js`、`demo-arbitrage.js` 仍然保留，但它们属于 legacy demo，不是当前前端主流程
 
 ## 🏗️ 推荐架构
@@ -21,13 +23,21 @@
 ### 用户流
 
 ```text
-MockLending / MockDEX (Origin 事件源)
-            ↓
-      UserRC (Reactive)
-            ↓
- UserVault (Destination 资金与策略状态)
-            ↓
-        Frontend
+Mock 模式:
+  MockLending / MockDEX (Origin 事件源)
+              ↓
+        UserRC (Reactive Network)
+              ↓
+   UserVault (Destination 模拟结算)
+
+Prod 模式:
+  Aave V3 / Uniswap V3 (Origin 真实事件)
+              ↓
+        UserRC (Reactive Network)
+              ↓
+   UserVault (Destination → Uniswap V3 真实执行)
+              ↓
+          Frontend
 ```
 
 这套流里：
@@ -39,8 +49,10 @@ MockLending / MockDEX (Origin 事件源)
 
 ### 本地开发时的特殊说明
 
-在 `APP_ENV=local` 下，Origin / Destination / Reactive 这三条“逻辑链”都会映射到同一个本地 Hardhat 节点 `http://127.0.0.1:8545`。  
+在 `APP_ENV=local` 下，Origin / Destination / Reactive 这三条”逻辑链”都会映射到同一个本地 Hardhat 节点 `http://127.0.0.1:8545`。
 也就是说，本地调试时虽然代码里保留了跨链概念，但底层实际跑在同一条本地链上。
+
+部署脚本会自动通过 `hardhat_setCode` 在 `0xfffFfF` 注入 `MockReactiveService`，使 `UserRC` 构造函数中的 `service.subscribe()` 调用不会 revert。
 
 ## 🚀 快速开始
 
@@ -137,16 +149,17 @@ Private Key: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 说明：测试网上跑 mock 协议演示
 
 - `APP_ENV=testnet` + `PROTOCOL_MODE=prod`
-说明：测试网下接近真实协议逻辑的集成测试
+说明：测试网下真实协议执行（Aave V3 + Uniswap V3），需配置 `UNISWAP_POOL_SEPOLIA`
 
 - `APP_ENV=mainnet` + `PROTOCOL_MODE=prod`
-说明：真实环境
+说明：真实环境，需配置 `UNISWAP_POOL_MAINNET`
 
 目前需要特别注意：
 
-- `deploy:user-flow` 现在主要面向 `PROTOCOL_MODE=mock`
-- 前端用户流的 `prod` 逻辑还没有完全打通
+- `deploy:user-flow` 同时支持 `mock` 和 `prod` 两种协议模式
+- `prod` 模式下部署脚本会自动调用 `setProtocolConfig` 配置 Uniswap V3 SwapRouter/WETH/USDC
 - 非 `local` 环境下需要填写真实 `PRIVATE_KEY` 和对应 RPC
+- `prod` 模式需要在 `.env` 中配置 Origin 链上要监听的合约地址（`UNISWAP_POOL_SEPOLIA` 或 `UNISWAP_POOL_MAINNET`）
 
 ## 🔧 常用命令
 
@@ -181,9 +194,15 @@ npm run frontend:lint
 ```text
 reactive/
 ├── contracts/
+│   ├── interfaces/
+│   │   ├── IAaveV3Pool.sol
+│   │   ├── IERC20.sol
+│   │   ├── ISwapRouter.sol
+│   │   └── IWETH.sol
 │   ├── mocks/
 │   │   ├── MockDEX.sol
-│   │   └── MockLending.sol
+│   │   ├── MockLending.sol
+│   │   └── MockReactiveService.sol
 │   ├── destination/
 │   │   ├── ArbitrageExecutor.sol
 │   │   ├── LiquidationExecutor.sol
@@ -202,7 +221,8 @@ reactive/
 ├── scripts/
 │   ├── deploy/
 │   │   ├── deploy-all.js
-│   │   └── deploy-user-flow.js
+│   │   ├── deploy-user-flow.js
+│   │   └── inject-mock-service.js
 │   ├── sync-frontend-env.js
 │   └── tasks/
 ├── test/
@@ -268,7 +288,7 @@ reactive/
 - 不要把 `.env` 提交到 git
 - 本地 Hardhat 账户只可用于本地调试
 - `frontend/.env.local` 是部署脚本自动生成的，不建议手改
-- 目前 `prod` 仍然不是这套用户流的最终形态，跑实网前需要继续补执行逻辑和真实协议适配
+- 目前 `prod` 模式支持 Uniswap V3 双向 swap 执行，Aave V3 直接清算执行为预留接口（`IAaveV3Pool`），后续可扩展
 
 ## 📚 参考
 

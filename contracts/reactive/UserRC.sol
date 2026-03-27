@@ -93,15 +93,14 @@ abstract contract AbstractReactive {
 contract UserRC is AbstractReactive {
     // ─── 常量 ──────────────────────────────────────────────────────────────────
 
-    uint256 private constant SEPOLIA_CHAIN_ID      = 11155111;
-    uint256 private constant BASE_SEPOLIA_CHAIN_ID = 84532;
     uint64  private constant CALLBACK_GAS_LIMIT    = 1000000;
 
-    // 事件签名 topic0（与 RCController 保持一致）
-    uint256 private constant HEALTH_FACTOR_UPDATED_TOPIC =
-        0x4ec2e8a3bd69e95166a040594140718c1942ce872ce67baf08738563aadfe9d7;
-    uint256 private constant SWAP_TOPIC =
-        0xd6d34547c69c5ee3d2667625c188acf1006abb93e0ee7cf03925c67cf7760413;
+    uint256 public immutable originChainId;   // 事件源链 ID（Origin）
+    uint256 public immutable destChainId;     // 回调目标链 ID（Destination）
+
+    // 事件签名 topic0（由 RCFactory 传入，mock/real 可切换）
+    uint256 public immutable liquidationTopic;
+    uint256 public immutable arbitrageTopic;
 
     // ─── 策略参数（镜像 UserVault.StrategyParams）─────────────────────────────
 
@@ -121,6 +120,8 @@ contract UserRC is AbstractReactive {
     event LiquidationTriggered(address indexed user, uint256 healthFactor);
     event ArbitrageTriggered(uint256 spreadPct);
     event Stopped(address indexed user, uint256 refundAmount);
+    event Paused(address indexed user);
+    event Resumed(address indexed user);
     event ParamsUpdated(address indexed user);
 
     // ─── 状态变量 ──────────────────────────────────────────────────────────────
@@ -129,9 +130,9 @@ contract UserRC is AbstractReactive {
     address public immutable vault;      // UserVault 合约地址
     address public immutable factory;    // RCFactory 地址
 
-    // Origin 链合约地址（事件源）
-    address public mockLending;
-    address public mockDexA;
+    // Origin 链合约地址（事件源，mock 或真实协议）
+    address public originLending;
+    address public originDex;
 
     // Destination 链合约地址（执行目标）
     address public userVaultOnDest;      // UserVault 在 destination 链的地址
@@ -144,40 +145,48 @@ contract UserRC is AbstractReactive {
     constructor(
         address _user,
         address _vault,
-        address _mockLending,
-        address _mockDexA,
-        StrategyParams memory _params
+        address _originLending,
+        address _originDex,
+        StrategyParams memory _params,
+        uint256 _originChainId,
+        uint256 _destChainId,
+        uint256 _liquidationTopic,
+        uint256 _arbitrageTopic
     ) payable {
         user = _user;
         vault = _vault;
         factory = msg.sender;
-        mockLending = _mockLending;
-        mockDexA = _mockDexA;
+        originLending = _originLending;
+        originDex = _originDex;
         userVaultOnDest = _vault;
         params = _params;
         active = true;
+        originChainId = _originChainId;
+        destChainId = _destChainId;
+        liquidationTopic = _liquidationTopic;
+        arbitrageTopic = _arbitrageTopic;
 
-        // 订阅事件（仅在非 ReactVM 模式）
+        // 订阅事件（仅在非 ReactVM 模式；本地开发时 service 可能不存在，忽略错误）
         if (!vm) {
             if (_params.enableLiquidation) {
-                service.subscribe(
-                    SEPOLIA_CHAIN_ID,
-                    _mockLending,
-                    HEALTH_FACTOR_UPDATED_TOPIC,
+                try service.subscribe(
+                    originChainId,
+                    _originLending,
+                    _liquidationTopic,
                     REACTIVE_IGNORE,
                     REACTIVE_IGNORE,
                     REACTIVE_IGNORE
-                );
+                ) {} catch {}
             }
             if (_params.enableArbitrage) {
-                service.subscribe(
-                    SEPOLIA_CHAIN_ID,
-                    _mockDexA,
-                    SWAP_TOPIC,
+                try service.subscribe(
+                    originChainId,
+                    _originDex,
+                    _arbitrageTopic,
                     REACTIVE_IGNORE,
                     REACTIVE_IGNORE,
                     REACTIVE_IGNORE
-                );
+                ) {} catch {}
             }
         }
     }
@@ -187,9 +196,9 @@ contract UserRC is AbstractReactive {
     function react(LogRecord calldata log) external vmOnly {
         if (!active) return;
 
-        if (log._contract == mockLending && params.enableLiquidation) {
+        if (log._contract == originLending && params.enableLiquidation) {
             _handleHealthFactor(log);
-        } else if (log._contract == mockDexA && params.enableArbitrage) {
+        } else if (log._contract == originDex && params.enableArbitrage) {
             _handleSwap(log);
         }
     }
@@ -209,12 +218,12 @@ contract UserRC is AbstractReactive {
             "executeForUser(address,string,address,address,uint256)",
             user,
             "liquidation",
-            mockLending,
+            originLending,
             targetUser,
             totalDebt
         );
 
-        emit Callback(BASE_SEPOLIA_CHAIN_ID, userVaultOnDest, CALLBACK_GAS_LIMIT, payload);
+        emit Callback(destChainId, userVaultOnDest, CALLBACK_GAS_LIMIT, payload);
     }
 
     function _handleSwap(LogRecord calldata log) internal {
@@ -235,12 +244,12 @@ contract UserRC is AbstractReactive {
             "executeForUser(address,string,address,address,uint256)",
             user,
             "arbitrage",
-            mockDexA,
+            originDex,
             address(0),
             newPrice
         );
 
-        emit Callback(BASE_SEPOLIA_CHAIN_ID, userVaultOnDest, CALLBACK_GAS_LIMIT, payload);
+        emit Callback(destChainId, userVaultOnDest, CALLBACK_GAS_LIMIT, payload);
     }
 
     // ─── 参数更新（由 factory 或用户通过 factory 调用）────────────────────────
@@ -253,31 +262,83 @@ contract UserRC is AbstractReactive {
 
     // ─── 停止并退款 ────────────────────────────────────────────────────────────
 
+    /**
+     * @notice 暂停 RC：取消订阅但不退款，保留 mapping，可恢复
+     */
+    function pause() external {
+        require(msg.sender == factory || msg.sender == user, "Unauthorized");
+        require(active, "Already paused");
+        active = false;
+
+        if (!vm) {
+            if (params.enableLiquidation) {
+                try service.unsubscribe(
+                    originChainId, originLending, liquidationTopic,
+                    REACTIVE_IGNORE, REACTIVE_IGNORE, REACTIVE_IGNORE
+                ) {} catch {}
+            }
+            if (params.enableArbitrage) {
+                try service.unsubscribe(
+                    originChainId, originDex, arbitrageTopic,
+                    REACTIVE_IGNORE, REACTIVE_IGNORE, REACTIVE_IGNORE
+                ) {} catch {}
+            }
+        }
+
+        emit Paused(user);
+    }
+
+    /**
+     * @notice 恢复 RC：重新订阅，不需要重新部署
+     */
+    function resume() external {
+        require(msg.sender == factory || msg.sender == user, "Unauthorized");
+        require(!active, "Already active");
+        active = true;
+
+        if (!vm) {
+            if (params.enableLiquidation) {
+                try service.subscribe(
+                    originChainId, originLending, liquidationTopic,
+                    REACTIVE_IGNORE, REACTIVE_IGNORE, REACTIVE_IGNORE
+                ) {} catch {}
+            }
+            if (params.enableArbitrage) {
+                try service.subscribe(
+                    originChainId, originDex, arbitrageTopic,
+                    REACTIVE_IGNORE, REACTIVE_IGNORE, REACTIVE_IGNORE
+                ) {} catch {}
+            }
+        }
+
+        emit Resumed(user);
+    }
+
     function stop() external {
         require(msg.sender == factory || msg.sender == user, "Unauthorized");
         active = false;
 
-        // 取消订阅
+        // 取消订阅（本地开发时 service 可能不存在，忽略错误）
         if (!vm) {
             if (params.enableLiquidation) {
-                service.unsubscribe(
-                    SEPOLIA_CHAIN_ID,
-                    mockLending,
-                    HEALTH_FACTOR_UPDATED_TOPIC,
+                try service.unsubscribe(
+                    originChainId,
+                    originLending,
+                    liquidationTopic,
                     REACTIVE_IGNORE,
                     REACTIVE_IGNORE,
                     REACTIVE_IGNORE
-                );
+                ) {} catch {}
             }
             if (params.enableArbitrage) {
-                service.unsubscribe(
-                    SEPOLIA_CHAIN_ID,
-                    mockDexA,
-                    SWAP_TOPIC,
+                try service.unsubscribe(
+                    originChainId,
+                    originDex,
+                    arbitrageTopic,
                     REACTIVE_IGNORE,
                     REACTIVE_IGNORE,
                     REACTIVE_IGNORE
-                );
+                ) {} catch {}
             }
         }
 

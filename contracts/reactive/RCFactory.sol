@@ -12,17 +12,24 @@ contract RCFactory {
 
     event RCDeployed(address indexed user, address indexed rcAddress, uint256 gasFunded);
     event RCStopped(address indexed user, address indexed rcAddress);
+    event RCPaused(address indexed user, address indexed rcAddress);
+    event RCResumed(address indexed user, address indexed rcAddress);
     event ParamsUpdated(address indexed user, address indexed rcAddress);
 
     // ─── 状态变量 ──────────────────────────────────────────────────────────────
 
     address public owner;
-    address public vault;          // UserVault 合约地址（Destination 链）
-    address public mockLending;    // Origin 链 MockLending 地址
-    address public mockDexA;       // Origin 链 MockDEX 地址
+    address public vault;
+    address public originLending;      // Origin 链借贷合约（mock 或 Aave）
+    address public originDex;          // Origin 链 DEX 合约（mock 或 Uniswap）
+    uint256 public originChainId;      // Origin 链 ID（事件源）
+    uint256 public destChainId;        // Destination 链 ID（回调目标）
+    uint256 public liquidationTopic;   // 清算事件 topic0
+    uint256 public arbitrageTopic;     // 套利事件 topic0
 
     mapping(address => address) public userRC;   // user => UserRC 合约地址
     address[] public allUsers;
+    uint256 public activeUserCount;              // 活跃用户数（部署后 +1，停止后 -1）
 
     // ─── 修饰符 ────────────────────────────────────────────────────────────────
 
@@ -33,11 +40,23 @@ contract RCFactory {
 
     // ─── 构造函数 ──────────────────────────────────────────────────────────────
 
-    constructor(address _vault, address _mockLending, address _mockDexA) {
+    constructor(
+        address _vault,
+        address _originLending,
+        address _originDex,
+        uint256 _originChainId,
+        uint256 _destChainId,
+        uint256 _liquidationTopic,
+        uint256 _arbitrageTopic
+    ) {
         owner = msg.sender;
         vault = _vault;
-        mockLending = _mockLending;
-        mockDexA = _mockDexA;
+        originLending = _originLending;
+        originDex = _originDex;
+        originChainId = _originChainId;
+        destChainId = _destChainId;
+        liquidationTopic = _liquidationTopic;
+        arbitrageTopic = _arbitrageTopic;
     }
 
     // ─── 核心：部署用户 RC ─────────────────────────────────────────────────────
@@ -58,13 +77,18 @@ contract RCFactory {
         UserRC rc = new UserRC{value: msg.value}(
             user,
             vault,
-            mockLending,
-            mockDexA,
-            params
+            originLending,
+            originDex,
+            params,
+            originChainId,
+            destChainId,
+            liquidationTopic,
+            arbitrageTopic
         );
 
         userRC[user] = address(rc);
         allUsers.push(user);
+        activeUserCount++;
 
         emit RCDeployed(user, address(rc), msg.value);
     }
@@ -78,7 +102,33 @@ contract RCFactory {
         require(rcAddr != address(0), "No RC");
 
         UserRC(payable(rcAddr)).stop();
+        delete userRC[user];  // 清除映射，允许用户重新部署 RC
+        if (activeUserCount > 0) activeUserCount--;
         emit RCStopped(user, rcAddr);
+    }
+
+    /**
+     * @notice 暂停用户 RC（取消订阅，保留 mapping，不退款，可恢复）
+     */
+    function pauseRC(address user) external {
+        require(msg.sender == owner || msg.sender == user, "Unauthorized");
+        address rcAddr = userRC[user];
+        require(rcAddr != address(0), "No RC");
+
+        UserRC(payable(rcAddr)).pause();
+        emit RCPaused(user, rcAddr);
+    }
+
+    /**
+     * @notice 恢复用户 RC（重新订阅，不需要重新部署）
+     */
+    function resumeRC(address user) external {
+        require(msg.sender == owner || msg.sender == user, "Unauthorized");
+        address rcAddr = userRC[user];
+        require(rcAddr != address(0), "No RC");
+
+        UserRC(payable(rcAddr)).resume();
+        emit RCResumed(user, rcAddr);
     }
 
     /**
@@ -121,6 +171,10 @@ contract RCFactory {
     }
 
     function getUserCount() external view returns (uint256) {
+        return activeUserCount;
+    }
+
+    function getTotalDeployments() external view returns (uint256) {
         return allUsers.length;
     }
 
@@ -130,9 +184,9 @@ contract RCFactory {
         vault = _vault;
     }
 
-    function setOriginContracts(address _mockLending, address _mockDexA) external onlyOwner {
-        mockLending = _mockLending;
-        mockDexA = _mockDexA;
+    function setOriginContracts(address _originLending, address _originDex) external onlyOwner {
+        originLending = _originLending;
+        originDex = _originDex;
     }
 
     receive() external payable {}

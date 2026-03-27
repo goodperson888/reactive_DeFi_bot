@@ -3,7 +3,7 @@
 import { useState } from "react";
 import {
   useAccount, useReadContract, useWriteContract,
-  useWaitForTransactionReceipt, useBalance,
+  useWaitForTransactionReceipt, useBalance, useSwitchChain, useConnections,
 } from "wagmi";
 import { parseEther, formatEther } from "viem";
 import { CONTRACTS, destinationChain, reactiveChain } from "@/lib/wagmi";
@@ -16,14 +16,20 @@ const RC_GAS_DEFAULT = "0.005";
 
 export default function DashboardPage() {
   const hydrated = useHydrated();
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
 
   const [depositAmount, setDepositAmount] = useState("");
   const [withdrawAmount, setWithdrawAmount] = useState("");
   const [rcGasBudget, setRcGasBudget] = useState(RC_GAS_DEFAULT);
 
-  const { writeContract, data: txHash, isPending } = useWriteContract();
+  const { writeContract, data: txHash, isPending, error: writeError } = useWriteContract();
   const { isLoading: isConfirming } = useWaitForTransactionReceipt({ hash: txHash });
+  const { switchChain, isPending: isSwitching } = useSwitchChain();
+  const connections = useConnections();
+  // 取当前活跃连接的 connector（就是用户选择的那个，避免 Phantom 劫持）
+  const activeConnector = connections[0]?.connector;
+
+  const isWrongChain = !!address && chainId !== destinationChain.id;
 
   const { data: userInfo, refetch } = useReadContract({
     address: CONTRACTS.userVault,
@@ -102,7 +108,7 @@ export default function DashboardPage() {
       abi: RC_FACTORY_ABI,
       functionName: "deployRC",
       chainId: reactiveChain.id,
-      // 使用 UserVault 里存的默认参数，传空结构体让合约用默认值
+      gas: 3_000_000n,
       args: [{
         healthFactorThreshold: 105n * 10n ** 16n,
         spreadThreshold: 100n,
@@ -140,12 +146,35 @@ export default function DashboardPage() {
   }
 
   function handleToggleStrategy() {
+    // 同步暂停/恢复 UserVault 策略状态
     writeContract({
       address: CONTRACTS.userVault,
       abi: USER_VAULT_ABI,
       functionName: isActive ? "pauseStrategy" : "resumeStrategy",
       chainId: destinationChain.id,
     }, { onSuccess: () => refetch() });
+  }
+
+  function handlePauseRC() {
+    if (!address) return;
+    writeContract({
+      address: CONTRACTS.rcFactory,
+      abi: RC_FACTORY_ABI,
+      functionName: "pauseRC",
+      args: [address],
+      chainId: reactiveChain.id,
+    }, { onSuccess: () => refetchFactoryRcAddress() });
+  }
+
+  function handleResumeRC() {
+    if (!address) return;
+    writeContract({
+      address: CONTRACTS.rcFactory,
+      abi: RC_FACTORY_ABI,
+      functionName: "resumeRC",
+      args: [address],
+      chainId: reactiveChain.id,
+    }, { onSuccess: () => refetchFactoryRcAddress() });
   }
 
   if (!hydrated) {
@@ -177,6 +206,22 @@ export default function DashboardPage() {
       <Navbar />
       <div className="max-w-4xl mx-auto px-6 py-10 w-full">
 
+        {/* 网络不匹配提示（本地/测试网开发时才会出现，正式网用户默认在正确网络） */}
+        {hydrated && isWrongChain && (
+          <div className="mb-6 flex items-center justify-between bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3">
+            <span className="text-sm text-yellow-400">
+              当前网络不匹配，请切换到 <strong>{destinationChain.name}</strong>（Chain ID: {destinationChain.id}）
+            </span>
+            <button
+              onClick={() => switchChain({ chainId: destinationChain.id as any, connector: activeConnector })}
+              disabled={isSwitching}
+              className="ml-4 text-sm bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+            >
+              {isSwitching ? "切换中..." : "一键切换"}
+            </button>
+          </div>
+        )}
+
         {/* 全局统计 */}
         <div className="grid grid-cols-3 gap-4 mb-8">
           {[
@@ -190,6 +235,13 @@ export default function DashboardPage() {
             </div>
           ))}
         </div>
+
+        {/* 错误提示 */}
+        {writeError && (
+          <div className="mb-6 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400 break-all">
+            {(writeError as any)?.shortMessage || writeError.message}
+          </div>
+        )}
 
         {/* 新用户引导：两步流程 */}
         {step < 3 && (
@@ -350,13 +402,20 @@ export default function DashboardPage() {
                 ))}
               </div>
 
-              {/* RC 余额 */}
+              {/* RC gas 剩余 */}
               <div className="bg-gray-800 rounded-lg px-3 py-2 mb-4 flex justify-between text-xs">
                 <span className="text-gray-400">RC gas 剩余</span>
                 <span className="font-mono text-yellow-400">
                   {rcBalance ? `${formatEther(rcBalance as bigint).slice(0, 8)} ETH` : "—"}
                 </span>
               </div>
+
+              {/* 余额为 0 警告 */}
+              {balance === 0n && totalDeposited > 0n && (
+                <div className="mb-4 bg-orange-500/10 border border-orange-500/30 rounded-lg px-3 py-2 text-xs text-orange-400">
+                  余额为 0，策略无法执行。请追加存款或提款退出。
+                </div>
+              )}
 
               <button
                 onClick={handleToggleStrategy}
@@ -369,6 +428,24 @@ export default function DashboardPage() {
               >
                 {isActive ? "暂停策略" : "启动策略"}
               </button>
+
+              {/* RC 暂停/恢复（Reactive 链操作） */}
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={handlePauseRC}
+                  disabled={isPending || isConfirming}
+                  className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 disabled:opacity-50 transition-colors"
+                >
+                  暂停 RC
+                </button>
+                <button
+                  onClick={handleResumeRC}
+                  disabled={isPending || isConfirming}
+                  className="flex-1 py-1.5 rounded-lg text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 disabled:opacity-50 transition-colors"
+                >
+                  恢复 RC
+                </button>
+              </div>
             </div>
 
             {/* 存取款 */}

@@ -21,6 +21,14 @@ export const RC_FACTORY_ABI = [
     inputs: [{ name: "user", type: "address" }], outputs: []
   },
   {
+    name: "pauseRC", type: "function", stateMutability: "nonpayable",
+    inputs: [{ name: "user", type: "address" }], outputs: []
+  },
+  {
+    name: "resumeRC", type: "function", stateMutability: "nonpayable",
+    inputs: [{ name: "user", type: "address" }], outputs: []
+  },
+  {
     name: "topUpRC", type: "function", stateMutability: "payable",
     inputs: [{ name: "user", type: "address" }], outputs: []
   },
