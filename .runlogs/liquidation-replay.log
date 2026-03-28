@@ -1,0 +1,15 @@
+=== Controlled Liquidation Replay ===
+{"user":"0x03821460938885DCDBe111236A2da58607aB276D","mockLending":"0xb1b39Eaffb4A6AA764c459E016cc19a7141b9b11","vault":"0x98c8f4BB8c9Bbd88160f33789c984648e2dC6a19","rcFactory":"0x9a646d45D3Bb00F484A100318824741B8b4Ddf89","userRC":"0xD5C6426079a0ecbE452aF71280598253E11037aD"}
+beforeVault {"balance":"10000000000000000","totalDeposited":"10000000000000000","totalProfit":"0","executionCount":"0","isActive":true,"rcAddress":"0xD5C6426079a0ecbE452aF71280598253E11037aD"}
+resetTx 0x6078ebff3ffd30e72a0fd3902e151c7411d7e90857363517b34475e0eab5654e
+triggerTx 0x573acf013845dd883736871801f600684fb48b47e27e42012db91863056314e4
+poll 1 {"reactiveBlock":"2902825","baseBlock":"39460760","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+poll 2 {"reactiveBlock":"2902826","baseBlock":"39460767","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+poll 3 {"reactiveBlock":"2902829","baseBlock":"39460775","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+poll 4 {"reactiveBlock":"2902832","baseBlock":"39460786","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+poll 5 {"reactiveBlock":"2902834","baseBlock":"39460793","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+poll 6 {"reactiveBlock":"2902836","baseBlock":"39460799","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+poll 7 {"reactiveBlock":"2902838","baseBlock":"39460806","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+poll 8 {"reactiveBlock":"2902840","baseBlock":"39460813","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+poll 9 {"reactiveBlock":"2902842","baseBlock":"39460820","liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","balance":"10000000000000000","totalProfit":"0"}
+TIMEOUT

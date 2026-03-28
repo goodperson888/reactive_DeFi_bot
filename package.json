@@ -6,9 +6,12 @@
     "compile": "hardhat compile",
     "local:node": "hardhat node",
     "test": "hardhat test",
+    "deploy:all": "npx hardhat run scripts/deploy/deploy-all.js",
+    "demo:liquidation:testnet": "npx hardhat run scripts/tasks/demo-liquidation.js --network sepolia",
+    "demo:arbitrage:testnet": "node scripts/tasks/demo-arbitrage.js",
     "deploy:user-flow": "npx hardhat run scripts/deploy/deploy-user-flow.js --network localhost",
-    "deploy:user-flow:testnet": "APP_ENV=testnet PROTOCOL_MODE=mock npx hardhat run scripts/deploy/deploy-user-flow.js",
-    "deploy:user-flow:mainnet": "APP_ENV=mainnet PROTOCOL_MODE=mock npx hardhat run scripts/deploy/deploy-user-flow.js",
+    "deploy:user-flow:testnet": "cross-env APP_ENV=testnet PROTOCOL_MODE=mock npx hardhat run scripts/deploy/deploy-user-flow.js",
+    "deploy:user-flow:mainnet": "cross-env APP_ENV=mainnet PROTOCOL_MODE=mock npx hardhat run scripts/deploy/deploy-user-flow.js",
     "inject:mock-service": "npx hardhat run scripts/deploy/inject-mock-service.js --network localhost",
     "sync:frontend-env": "node scripts/sync-frontend-env.js",
     "frontend:dev": "npm --prefix frontend run dev",
@@ -19,6 +22,7 @@
   "devDependencies": {
     "hardhat": "^2.19.0",
     "@nomicfoundation/hardhat-toolbox": "^3.0.0",
+    "cross-env": "^10.1.0",
     "dotenv": "^16.3.1"
   }
 }

@@ -5,9 +5,9 @@ import {
   useAccount, useReadContract, useWriteContract,
   useWaitForTransactionReceipt, useBalance, useSwitchChain, useConnections,
 } from "wagmi";
-import { parseEther, formatEther } from "viem";
-import { CONTRACTS, destinationChain, reactiveChain } from "@/lib/wagmi";
-import { USER_VAULT_ABI, RC_FACTORY_ABI } from "@/lib/abi";
+import { parseEther, formatEther, formatUnits } from "viem";
+import { CONTRACTS, destinationChain, reactiveChain, originChain, DEMO_WALLET_ADDRESS } from "@/lib/wagmi";
+import { USER_VAULT_ABI, RC_FACTORY_ABI, MOCK_LENDING_ABI } from "@/lib/abi";
 import { Navbar } from "@/components/Navbar";
 import { useHydrated } from "@/lib/useHydrated";
 
@@ -20,6 +20,7 @@ export default function DashboardPage() {
 
   const [depositAmount, setDepositAmount] = useState("");
   const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [withdrawSource, setWithdrawSource] = useState<"base" | "sepolia">("base");
   const [rcGasBudget, setRcGasBudget] = useState(RC_GAS_DEFAULT);
 
   const { writeContract, data: txHash, isPending, error: writeError } = useWriteContract();
@@ -28,8 +29,6 @@ export default function DashboardPage() {
   const connections = useConnections();
   // 取当前活跃连接的 connector（就是用户选择的那个，避免 Phantom 劫持）
   const activeConnector = connections[0]?.connector;
-
-  const isWrongChain = !!address && chainId !== destinationChain.id;
 
   const { data: userInfo, refetch } = useReadContract({
     address: CONTRACTS.userVault,
@@ -59,6 +58,27 @@ export default function DashboardPage() {
   });
 
   const { data: walletBalance } = useBalance({ address, chainId: destinationChain.id });
+  const { data: sepoliaWalletBalance } = useBalance({ address, chainId: originChain.id });
+  const demoAddress = (DEMO_WALLET_ADDRESS || address || "0x0000000000000000000000000000000000000000") as `0x${string}`;
+  const canReadSepoliaPosition = !!CONTRACTS.mockLending && demoAddress !== "0x0000000000000000000000000000000000000000";
+
+  const { data: sepoliaPosition } = useReadContract({
+    address: CONTRACTS.mockLending,
+    abi: MOCK_LENDING_ABI,
+    functionName: "positions",
+    args: [demoAddress],
+    chainId: originChain.id,
+    query: { enabled: canReadSepoliaPosition },
+  });
+
+  const { data: sepoliaHealthFactor } = useReadContract({
+    address: CONTRACTS.mockLending,
+    abi: MOCK_LENDING_ABI,
+    functionName: "getHealthFactor",
+    args: [demoAddress],
+    chainId: originChain.id,
+    query: { enabled: canReadSepoliaPosition },
+  });
 
   const { data: tvl } = useReadContract({
     address: CONTRACTS.userVault,
@@ -84,15 +104,40 @@ export default function DashboardPage() {
   const hasDeployedRC = !!deployedRcAddress && deployedRcAddress !== "0x0000000000000000000000000000000000000000";
   const hasSyncedRC = !!vaultRcAddress && vaultRcAddress !== "0x0000000000000000000000000000000000000000";
   const hasDeposit = totalDeposited > 0n;
+  const strategyParams = userInfo ? (userInfo[6] as {
+    enableLiquidation: boolean;
+    enableArbitrage: boolean;
+  }) : null;
 
   const unrealizedProfit = balance > totalDeposited ? balance - totalDeposited : 0n;
   const estimatedFee = (unrealizedProfit * 2000n) / 10000n;
 
   // 步骤状态
   const step = !hasDeposit ? 1 : !hasDeployedRC || !hasSyncedRC ? 2 : 3;
+  const stepAction = !hasDeposit
+    ? "deposit"
+    : !hasDeployedRC
+      ? "deploy_rc"
+      : !hasSyncedRC
+        ? "sync_rc"
+        : "manage";
+  const requiredChain = stepAction === "deploy_rc" ? reactiveChain : destinationChain;
+  const isWrongChain = !!address && chainId !== requiredChain.id;
+  const isLiquidationOnlyStrategy =
+    !!strategyParams &&
+    strategyParams.enableLiquidation &&
+    !strategyParams.enableArbitrage;
+
+  function switchTo(chainIdTarget: number) {
+    switchChain({ chainId: chainIdTarget, connector: activeConnector });
+  }
 
   function handleDeposit() {
     if (!depositAmount) return;
+    if (chainId !== destinationChain.id) {
+      switchTo(destinationChain.id);
+      return;
+    }
     writeContract({
       address: CONTRACTS.userVault,
       abi: USER_VAULT_ABI,
@@ -103,6 +148,10 @@ export default function DashboardPage() {
   }
 
   function handleDeployRC() {
+    if (chainId !== reactiveChain.id) {
+      switchTo(reactiveChain.id);
+      return;
+    }
     writeContract({
       address: CONTRACTS.rcFactory,
       abi: RC_FACTORY_ABI,
@@ -125,6 +174,10 @@ export default function DashboardPage() {
 
   function handleSyncRC() {
     if (!deployedRcAddress) return;
+    if (chainId !== destinationChain.id) {
+      switchTo(destinationChain.id);
+      return;
+    }
     writeContract({
       address: CONTRACTS.userVault,
       abi: USER_VAULT_ABI,
@@ -135,6 +188,17 @@ export default function DashboardPage() {
   }
 
   function handleWithdraw() {
+    if (withdrawSource === "sepolia") {
+      if (chainId !== originChain.id) {
+        switchTo(originChain.id);
+      }
+      return;
+    }
+
+    if (chainId !== destinationChain.id) {
+      switchTo(destinationChain.id);
+      return;
+    }
     const amount = withdrawAmount ? parseEther(withdrawAmount) : 0n;
     writeContract({
       address: CONTRACTS.userVault,
@@ -146,6 +210,10 @@ export default function DashboardPage() {
   }
 
   function handleToggleStrategy() {
+    if (chainId !== destinationChain.id) {
+      switchTo(destinationChain.id);
+      return;
+    }
     // 同步暂停/恢复 UserVault 策略状态
     writeContract({
       address: CONTRACTS.userVault,
@@ -157,6 +225,10 @@ export default function DashboardPage() {
 
   function handlePauseRC() {
     if (!address) return;
+    if (chainId !== reactiveChain.id) {
+      switchTo(reactiveChain.id);
+      return;
+    }
     writeContract({
       address: CONTRACTS.rcFactory,
       abi: RC_FACTORY_ABI,
@@ -168,6 +240,10 @@ export default function DashboardPage() {
 
   function handleResumeRC() {
     if (!address) return;
+    if (chainId !== reactiveChain.id) {
+      switchTo(reactiveChain.id);
+      return;
+    }
     writeContract({
       address: CONTRACTS.rcFactory,
       abi: RC_FACTORY_ABI,
@@ -210,17 +286,43 @@ export default function DashboardPage() {
         {hydrated && isWrongChain && (
           <div className="mb-6 flex items-center justify-between bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3">
             <span className="text-sm text-yellow-400">
-              当前网络不匹配，请切换到 <strong>{destinationChain.name}</strong>（Chain ID: {destinationChain.id}）
+              当前网络不匹配，请切换到 <strong>{requiredChain.name}</strong>（Chain ID: {requiredChain.id}）以完成
+              {stepAction === "deploy_rc" ? " RC 部署" : stepAction === "sync_rc" ? " RC 同步" : " Vault 操作"}。
             </span>
             <button
-              onClick={() => switchChain({ chainId: destinationChain.id as any, connector: activeConnector })}
+              onClick={() => switchTo(requiredChain.id)}
               disabled={isSwitching}
               className="ml-4 text-sm bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
             >
-              {isSwitching ? "切换中..." : "一键切换"}
+              {isSwitching ? "切换中..." : `切换到 ${requiredChain.name}`}
             </button>
           </div>
         )}
+
+        {step === 3 && isLiquidationOnlyStrategy && (
+          <div className="mb-6 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-300">
+            当前策略为“自动清算”模式：清算事件源在 Sepolia。套利已关闭，不影响后续再开启套利策略。
+          </div>
+        )}
+
+        {/* 双账本概览（短期止血版） */}
+        <div className="mb-6 grid grid-cols-2 gap-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <div className="text-xs text-gray-400 mb-1">Base 账本（Vault）</div>
+            <div className="text-sm text-gray-200">可提取余额：{formatEther(balance).slice(0, 10)} ETH</div>
+            <div className="text-xs text-gray-500 mt-1">收益显示与合约提款均在 Base Vault</div>
+          </div>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <div className="text-xs text-gray-400 mb-1">Sepolia 账本（清算执行）</div>
+            <div className="text-sm text-gray-200">
+              钱包余额：{sepoliaWalletBalance ? `${parseFloat(formatEther(sepoliaWalletBalance.value)).toFixed(6)} ETH` : "—"}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              HF：{sepoliaHealthFactor ? formatUnits(sepoliaHealthFactor as bigint, 18).slice(0, 8) : "—"} ·
+              债务：{sepoliaPosition ? `${(Number((sepoliaPosition as [bigint, bigint])[1]) / 1e6).toFixed(2)} USDC` : "—"}
+            </div>
+          </div>
+        </div>
 
         {/* 全局统计 */}
         <div className="grid grid-cols-3 gap-4 mb-8">
@@ -343,7 +445,7 @@ export default function DashboardPage() {
 
                     <button
                       onClick={handleDeployRC}
-                      disabled={isPending || isConfirming}
+                      disabled={isPending || isConfirming || chainId !== reactiveChain.id}
                       className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-black font-semibold py-3 rounded-lg text-sm transition-colors"
                     >
                       {isPending || isConfirming ? "部署中..." : `部署 RC（Reactive 链，支付 ${rcGasBudget} ETH）`}
@@ -363,7 +465,7 @@ export default function DashboardPage() {
                     </div>
                     <button
                       onClick={handleSyncRC}
-                      disabled={isPending || isConfirming}
+                      disabled={isPending || isConfirming || chainId !== destinationChain.id}
                       className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-black font-semibold py-3 rounded-lg text-sm transition-colors"
                     >
                       {isPending || isConfirming ? "同步中..." : "同步 RC 地址到 Vault"}
@@ -477,24 +579,57 @@ export default function DashboardPage() {
                     预计佣金：{formatEther(estimatedFee).slice(0, 8)} ETH（利润的 20%）
                   </p>
                 )}
+                <div className="mb-3 flex gap-2">
+                  <button
+                    onClick={() => setWithdrawSource("base")}
+                    className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ${
+                      withdrawSource === "base"
+                        ? "border-emerald-500/50 bg-emerald-500/20 text-emerald-300"
+                        : "border-gray-700 bg-gray-800 text-gray-400"
+                    }`}
+                  >
+                    Base Vault 提款
+                  </button>
+                  <button
+                    onClick={() => setWithdrawSource("sepolia")}
+                    className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ${
+                      withdrawSource === "sepolia"
+                        ? "border-cyan-500/50 bg-cyan-500/20 text-cyan-300"
+                        : "border-gray-700 bg-gray-800 text-gray-400"
+                    }`}
+                  >
+                    Sepolia 钱包提现
+                  </button>
+                </div>
                 <div className="flex gap-2">
                   <input
                     type="number"
-                    placeholder="0.0 ETH（留空=全部）"
+                    placeholder={withdrawSource === "base" ? "0.0 ETH（留空=全部）" : "Sepolia 钱包提现请在钱包中发起转账"}
                     value={withdrawAmount}
                     onChange={(e) => setWithdrawAmount(e.target.value)}
-                    className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-500"
+                    disabled={withdrawSource === "sepolia"}
+                    className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-emerald-500 disabled:opacity-60"
                   />
                   <button
                     onClick={handleWithdraw}
-                    disabled={balance === 0n || isPending || isConfirming || isActive}
+                    disabled={
+                      (withdrawSource === "base" && (balance === 0n || isPending || isConfirming || isActive)) ||
+                      (withdrawSource === "sepolia" && isSwitching)
+                    }
                     className="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm transition-colors"
                   >
-                    {isPending || isConfirming ? "确认中..." : "提取"}
+                    {withdrawSource === "base"
+                      ? (isPending || isConfirming ? "确认中..." : "提取")
+                      : `切换到 ${originChain.name}`}
                   </button>
                 </div>
-                {isActive && (
+                {withdrawSource === "base" && isActive && (
                   <p className="text-xs text-yellow-500 mt-2">请先暂停策略再提款</p>
+                )}
+                {withdrawSource === "sepolia" && (
+                  <p className="text-xs text-cyan-300 mt-2">
+                    Sepolia 清算收益在钱包余额中，当前不经过 Base Vault 合约提款。
+                  </p>
                 )}
               </div>
             </div>

@@ -31,7 +31,7 @@ export const CHAINS = {
   },
   reactive: {
     name: isLocal ? "localhost" : isMainnet ? "reactive-mainnet" : "reactive-testnet",
-    chainId: isLocal ? 31337 : Number(process.env.REACTIVE_CHAIN_ID || 5318008),
+    chainId: isLocal ? 31337 : Number(process.env.REACTIVE_CHAIN_ID || (isMainnet ? 1597 : 5318007)),
     rpc: isLocal ? LOCAL_RPC : (process.env.REACTIVE_RPC_URL || (isMainnet ? "https://mainnet-rpc.rnk.dev/" : "https://lasna-rpc.rnk.dev/")),
   },
 };

@@ -11,6 +11,11 @@ struct LogRecord {
     uint256 topic_2;
     uint256 topic_3;
     bytes data;
+    uint256 block_number;
+    uint256 op_code;
+    uint256 block_hash;
+    uint256 tx_hash;
+    uint256 log_index;
 }
 
 interface IReactiveService {
@@ -31,6 +36,10 @@ interface IReactiveService {
         uint256 topic_2,
         uint256 topic_3
     ) external;
+}
+
+interface IPayable {
+    function debt(address contractAddress) external view returns (uint256);
 }
 
 interface IUserVault {
@@ -66,15 +75,34 @@ abstract contract AbstractReactive {
         0xa65f96fc951c35ead38878e0f0b7a3c744a6f5ccc1476b313353ce31712313ad;
 
     IReactiveService internal service;
+    IPayable internal vendor;
     bool internal vm;
 
     constructor() {
         service = IReactiveService(0x0000000000000000000000000000000000fffFfF);
+        vendor = IPayable(0x0000000000000000000000000000000000fffFfF);
     }
 
     modifier vmOnly() {
         require(vm, "VM only");
         _;
+    }
+
+    function pay(uint256 amount) external {
+        require(msg.sender == address(vendor), "Authorized sender only");
+        _pay(payable(msg.sender), amount);
+    }
+
+    function coverDebt() public {
+        uint256 amount = vendor.debt(address(this));
+        _pay(payable(address(vendor)), amount);
+    }
+
+    function _pay(address payable receiver, uint256 amount) internal {
+        if (amount == 0) return;
+        require(address(this).balance >= amount, "Insufficient funds");
+        (bool ok,) = receiver.call{value: amount}("");
+        require(ok, "Payment failed");
     }
 
     event Callback(
@@ -215,7 +243,8 @@ contract UserRC is AbstractReactive {
         // 计算本次执行金额（用户余额 * maxPositionPct%）
         // 注：实际余额在 UserVault 里，这里传 user 地址让 Vault 自己算
         bytes memory payload = abi.encodeWithSignature(
-            "executeForUser(address,string,address,address,uint256)",
+            "executeForUser(address,address,string,address,address,uint256)",
+            address(0),
             user,
             "liquidation",
             originLending,
@@ -241,7 +270,8 @@ contract UserRC is AbstractReactive {
         emit ArbitrageTriggered(spreadPct);
 
         bytes memory payload = abi.encodeWithSignature(
-            "executeForUser(address,string,address,address,uint256)",
+            "executeForUser(address,address,string,address,address,uint256)",
+            address(0),
             user,
             "arbitrage",
             originDex,

@@ -1,15 +1,23 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { usePublicClient, useAccount } from "wagmi";
+import { usePublicClient } from "wagmi";
 import { formatEther } from "viem";
-import { CONTRACTS, destinationChain, APP_ENV } from "@/lib/wagmi";
-import { USER_VAULT_ABI } from "@/lib/abi";
+import { CONTRACTS, destinationChain, originChain, APP_ENV } from "@/lib/wagmi";
+import { USER_VAULT_ABI, MOCK_LENDING_ABI, MOCK_DEX_ABI } from "@/lib/abi";
 import { Navbar } from "@/components/Navbar";
+
+// Alchemy Free tier 对 eth_getLogs 的区块跨度有限制（最多约 10 blocks）。
+// 这里按小窗口分段回查，兼顾稳定性与 RPC 免费额度限制。
+const EVENT_LOOKBACK_BLOCKS = 64n;
+const EVENT_CHUNK_BLOCKS = 8n;
+
+const ETH_TOKEN = "0x0000000000000000000000000000000000000000";
+const USDC_TOKEN = "0x0000000000000000000000000000000000000001";
 
 type LogEntry = {
   id: string;
-  type: "execution" | "deposit" | "withdraw" | "paused";
+  type: "execution" | "deposit" | "withdraw" | "paused" | "hf_update" | "liquidated" | "dex_swap";
   user: string;
   strategyType?: string;
   success?: boolean;
@@ -17,12 +25,65 @@ type LogEntry = {
   loss?: bigint;
   amount?: bigint;
   fee?: bigint;
+  chain?: "Sepolia" | "Base Sepolia";
+  note?: string;
   timestamp: number;
   txHash?: string;
   blockNumber?: number;
 };
 
 // localStorage key（按链+合约地址区分，避免不同环境混用）
+function formatSwapContent(
+  chain: "Sepolia" | "Base Sepolia",
+  tokenIn: string,
+  amountIn: bigint,
+  tokenOut: string,
+  amountOut: bigint
+) {
+  const inLower = tokenIn.toLowerCase();
+  const outLower = tokenOut.toLowerCase();
+  if (inLower === ETH_TOKEN && outLower === USDC_TOKEN) {
+    return `[${chain}] 套利腿 ETH->USDC ${formatEther(amountIn).slice(0, 10)} ETH -> ${(Number(amountOut) / 1e6).toFixed(2)} USDC`;
+  }
+  if (inLower === USDC_TOKEN && outLower === ETH_TOKEN) {
+    return `[${chain}] 套利腿 USDC->ETH ${(Number(amountIn) / 1e6).toFixed(2)} USDC -> ${formatEther(amountOut).slice(0, 12)} ETH`;
+  }
+  return `[${chain}] Swap in=${amountIn.toString()} out=${amountOut.toString()}`;
+}
+
+async function getContractEventsChunked(
+  client: any,
+  params: {
+    address: `0x${string}`;
+    abi: readonly unknown[];
+    eventName: string;
+  },
+  fromBlock: bigint,
+  toBlock: bigint
+) {
+  if (toBlock < fromBlock) return [];
+  const logs: any[] = [];
+  let cursor = fromBlock;
+
+  while (cursor <= toBlock) {
+    const end = cursor + EVENT_CHUNK_BLOCKS - 1n > toBlock ? toBlock : cursor + EVENT_CHUNK_BLOCKS - 1n;
+    try {
+      const part = await client.getContractEvents({
+        ...params,
+        fromBlock: cursor,
+        toBlock: end,
+      });
+      logs.push(...part);
+    } catch (error) {
+      // 单个窗口失败不阻断整页，尽量收集其余窗口数据
+      console.error(`[activity] chunk fetch failed ${params.eventName} ${cursor}-${end}`, error);
+    }
+    cursor = end + 1n;
+  }
+
+  return logs;
+}
+
 function getCacheKey(chainId: number, vault: string) {
   return `activity_logs_${chainId}_${vault.toLowerCase()}`;
 }
@@ -71,8 +132,8 @@ export default function ActivityPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const client = usePublicClient({ chainId: destinationChain.id });
-  const { chainId } = useAccount();
-  const connected = Boolean(client && CONTRACTS.userVault);
+  const sepoliaClient = usePublicClient({ chainId: originChain.id });
+  const connected = Boolean((client && CONTRACTS.userVault) || (sepoliaClient && CONTRACTS.mockLending));
   const vault = CONTRACTS.userVault as string;
 
   // 合并新日志（去重 + 保持时间倒序）
@@ -97,6 +158,120 @@ export default function ActivityPage() {
     setLoading(false);
   }, [vault]);
 
+  // 进入页面时回查最近区块事件，避免仅依赖实时监听导致漏显示
+  useEffect(() => {
+    if (!client || !CONTRACTS.userVault) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const latest = await client.getBlockNumber();
+        const fromBlock = latest > EVENT_LOOKBACK_BLOCKS ? latest - EVENT_LOOKBACK_BLOCKS : 0n;
+
+        const [executionLogs, depositLogs, withdrawLogs, pausedLogs, baseSwapLogs] = await Promise.all([
+          getContractEventsChunked(
+            client,
+            { address: CONTRACTS.userVault, abi: USER_VAULT_ABI, eventName: "ExecutionResult" },
+            fromBlock,
+            latest
+          ),
+          getContractEventsChunked(
+            client,
+            { address: CONTRACTS.userVault, abi: USER_VAULT_ABI, eventName: "Deposited" },
+            fromBlock,
+            latest
+          ),
+          getContractEventsChunked(
+            client,
+            { address: CONTRACTS.userVault, abi: USER_VAULT_ABI, eventName: "Withdrawn" },
+            fromBlock,
+            latest
+          ),
+          getContractEventsChunked(
+            client,
+            { address: CONTRACTS.userVault, abi: USER_VAULT_ABI, eventName: "StrategyPaused" },
+            fromBlock,
+            latest
+          ),
+          CONTRACTS.mockDexB
+            ? getContractEventsChunked(
+                client,
+                { address: CONTRACTS.mockDexB, abi: MOCK_DEX_ABI, eventName: "Swap" },
+                fromBlock,
+                latest
+              )
+            : Promise.resolve([]),
+        ]);
+
+        if (cancelled) return;
+
+        mergeLogs([
+          ...executionLogs.map((log) => ({
+            id: `${log.transactionHash}-${log.logIndex}`,
+            type: "execution" as const,
+            user: log.args.user as string,
+            strategyType: log.args.strategyType as string,
+            success: log.args.success as boolean,
+            profit: log.args.profit as bigint,
+            loss: log.args.loss as bigint,
+            timestamp: Date.now(),
+            txHash: log.transactionHash ?? undefined,
+            blockNumber: Number(log.blockNumber),
+          })),
+          ...depositLogs.map((log) => ({
+            id: `${log.transactionHash}-${log.logIndex}`,
+            type: "deposit" as const,
+            user: log.args.user as string,
+            amount: log.args.amount as bigint,
+            timestamp: Date.now(),
+            txHash: log.transactionHash ?? undefined,
+            blockNumber: Number(log.blockNumber),
+          })),
+          ...withdrawLogs.map((log) => ({
+            id: `${log.transactionHash}-${log.logIndex}`,
+            type: "withdraw" as const,
+            user: log.args.user as string,
+            amount: log.args.amount as bigint,
+            fee: log.args.fee as bigint,
+            timestamp: Date.now(),
+            txHash: log.transactionHash ?? undefined,
+            blockNumber: Number(log.blockNumber),
+          })),
+          ...pausedLogs.map((log) => ({
+            id: `${log.transactionHash}-${log.logIndex}`,
+            type: "paused" as const,
+            user: log.args.user as string,
+            timestamp: Date.now(),
+            txHash: log.transactionHash ?? undefined,
+            blockNumber: Number(log.blockNumber),
+          })),
+          ...baseSwapLogs.map((log) => ({
+            id: `${log.transactionHash}-${log.logIndex}`,
+            type: "dex_swap" as const,
+            chain: "Base Sepolia" as const,
+            user: log.args.user as string,
+            note: formatSwapContent(
+              "Base Sepolia",
+              log.args.tokenIn as string,
+              log.args.amountIn as bigint,
+              log.args.tokenOut as string,
+              log.args.amountOut as bigint
+            ),
+            timestamp: Date.now(),
+            txHash: log.transactionHash ?? undefined,
+            blockNumber: Number(log.blockNumber),
+          })),
+        ]);
+      } catch (error) {
+        console.error("[activity] failed to backfill vault events", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [client, mergeLogs]);
+
   // 实时监听新事件
   useEffect(() => {
     if (!client || !CONTRACTS.userVault) return;
@@ -105,6 +280,9 @@ export default function ActivityPage() {
       address: CONTRACTS.userVault,
       abi: USER_VAULT_ABI,
       eventName: "ExecutionResult",
+      poll: true,
+      pollingInterval: 4000,
+      onError: () => {},
       onLogs: (newLogs) => {
         mergeLogs(newLogs.map((log) => ({
           id: `${log.transactionHash}-${log.logIndex}`,
@@ -125,6 +303,9 @@ export default function ActivityPage() {
       address: CONTRACTS.userVault,
       abi: USER_VAULT_ABI,
       eventName: "Deposited",
+      poll: true,
+      pollingInterval: 4000,
+      onError: () => {},
       onLogs: (newLogs) => {
         mergeLogs(newLogs.map((log) => ({
           id: `${log.transactionHash}-${log.logIndex}`,
@@ -142,6 +323,9 @@ export default function ActivityPage() {
       address: CONTRACTS.userVault,
       abi: USER_VAULT_ABI,
       eventName: "Withdrawn",
+      poll: true,
+      pollingInterval: 4000,
+      onError: () => {},
       onLogs: (newLogs) => {
         mergeLogs(newLogs.map((log) => ({
           id: `${log.transactionHash}-${log.logIndex}`,
@@ -160,6 +344,9 @@ export default function ActivityPage() {
       address: CONTRACTS.userVault,
       abi: USER_VAULT_ABI,
       eventName: "StrategyPaused",
+      poll: true,
+      pollingInterval: 4000,
+      onError: () => {},
       onLogs: (newLogs) => {
         mergeLogs(newLogs.map((log) => ({
           id: `${log.transactionHash}-${log.logIndex}`,
@@ -171,14 +358,199 @@ export default function ActivityPage() {
         })));
       },
     });
+    const unwatchBaseSwap = CONTRACTS.mockDexB
+      ? client.watchContractEvent({
+          address: CONTRACTS.mockDexB,
+          abi: MOCK_DEX_ABI,
+          eventName: "Swap",
+          poll: true,
+          pollingInterval: 4000,
+          onError: () => {},
+          onLogs: (newLogs) => {
+            mergeLogs(newLogs.map((log) => ({
+              id: `${log.transactionHash}-${log.logIndex}`,
+              type: "dex_swap" as const,
+              chain: "Base Sepolia" as const,
+              user: log.args.user as string,
+              note: formatSwapContent(
+                "Base Sepolia",
+                log.args.tokenIn as string,
+                log.args.amountIn as bigint,
+                log.args.tokenOut as string,
+                log.args.amountOut as bigint
+              ),
+              timestamp: Date.now(),
+              txHash: log.transactionHash ?? undefined,
+              blockNumber: Number(log.blockNumber),
+            })));
+          },
+        })
+      : () => {};
 
     return () => {
       unwatchExecution();
       unwatchDeposit();
       unwatchWithdraw();
       unwatchPaused();
+      unwatchBaseSwap();
     };
   }, [client, mergeLogs]);
+
+  useEffect(() => {
+    if (!sepoliaClient || !CONTRACTS.mockLending) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const latest = await sepoliaClient.getBlockNumber();
+        const fromBlock = latest > EVENT_LOOKBACK_BLOCKS ? latest - EVENT_LOOKBACK_BLOCKS : 0n;
+        const [hfLogs, liquidatedLogs, sepoliaSwapLogs] = await Promise.all([
+          getContractEventsChunked(
+            sepoliaClient,
+            { address: CONTRACTS.mockLending, abi: MOCK_LENDING_ABI, eventName: "HealthFactorUpdated" },
+            fromBlock,
+            latest
+          ),
+          getContractEventsChunked(
+            sepoliaClient,
+            { address: CONTRACTS.mockLending, abi: MOCK_LENDING_ABI, eventName: "Liquidated" },
+            fromBlock,
+            latest
+          ),
+          CONTRACTS.mockDexA
+            ? getContractEventsChunked(
+                sepoliaClient,
+                { address: CONTRACTS.mockDexA, abi: MOCK_DEX_ABI, eventName: "Swap" },
+                fromBlock,
+                latest
+              )
+            : Promise.resolve([]),
+        ]);
+
+        if (cancelled) return;
+
+        mergeLogs([
+          ...hfLogs.map((log) => ({
+            id: `${log.transactionHash}-${log.logIndex}`,
+            type: "hf_update" as const,
+            chain: "Sepolia" as const,
+            user: log.args.user as string,
+            note: `HF=${(Number(log.args.healthFactor) / 1e18).toFixed(4)}`,
+            timestamp: Date.now(),
+            txHash: log.transactionHash ?? undefined,
+            blockNumber: Number(log.blockNumber),
+          })),
+          ...liquidatedLogs.map((log) => ({
+            id: `${log.transactionHash}-${log.logIndex}`,
+            type: "liquidated" as const,
+            chain: "Sepolia" as const,
+            user: log.args.user as string,
+            amount: log.args.collateralSeized as bigint,
+            note: `debt=${(Number(log.args.debtRepaid) / 1e6).toFixed(2)} USDC`,
+            timestamp: Date.now(),
+            txHash: log.transactionHash ?? undefined,
+            blockNumber: Number(log.blockNumber),
+          })),
+          ...sepoliaSwapLogs.map((log) => ({
+            id: `${log.transactionHash}-${log.logIndex}`,
+            type: "dex_swap" as const,
+            chain: "Sepolia" as const,
+            user: log.args.user as string,
+            note: formatSwapContent(
+              "Sepolia",
+              log.args.tokenIn as string,
+              log.args.amountIn as bigint,
+              log.args.tokenOut as string,
+              log.args.amountOut as bigint
+            ),
+            timestamp: Date.now(),
+            txHash: log.transactionHash ?? undefined,
+            blockNumber: Number(log.blockNumber),
+          })),
+        ]);
+      } catch (error) {
+        console.error("[activity] failed to backfill sepolia events", error);
+      }
+    })();
+
+    const unwatchHF = sepoliaClient.watchContractEvent({
+      address: CONTRACTS.mockLending,
+      abi: MOCK_LENDING_ABI,
+      eventName: "HealthFactorUpdated",
+      poll: true,
+      pollingInterval: 4000,
+      onError: () => {},
+      onLogs: (newLogs) => {
+        mergeLogs(newLogs.map((log) => ({
+          id: `${log.transactionHash}-${log.logIndex}`,
+          type: "hf_update" as const,
+          chain: "Sepolia",
+          user: log.args.user as string,
+          note: `HF=${(Number(log.args.healthFactor) / 1e18).toFixed(4)}`,
+          timestamp: Date.now(),
+          txHash: log.transactionHash ?? undefined,
+          blockNumber: Number(log.blockNumber),
+        })));
+      },
+    });
+
+    const unwatchLiquidated = sepoliaClient.watchContractEvent({
+      address: CONTRACTS.mockLending,
+      abi: MOCK_LENDING_ABI,
+      eventName: "Liquidated",
+      poll: true,
+      pollingInterval: 4000,
+      onError: () => {},
+      onLogs: (newLogs) => {
+        mergeLogs(newLogs.map((log) => ({
+          id: `${log.transactionHash}-${log.logIndex}`,
+          type: "liquidated" as const,
+          chain: "Sepolia",
+          user: log.args.user as string,
+          amount: log.args.collateralSeized as bigint,
+          note: `debt=${(Number(log.args.debtRepaid) / 1e6).toFixed(2)} USDC`,
+          timestamp: Date.now(),
+          txHash: log.transactionHash ?? undefined,
+          blockNumber: Number(log.blockNumber),
+        })));
+      },
+    });
+    const unwatchSepoliaSwap = CONTRACTS.mockDexA
+      ? sepoliaClient.watchContractEvent({
+          address: CONTRACTS.mockDexA,
+          abi: MOCK_DEX_ABI,
+          eventName: "Swap",
+          poll: true,
+          pollingInterval: 4000,
+          onError: () => {},
+          onLogs: (newLogs) => {
+            mergeLogs(newLogs.map((log) => ({
+              id: `${log.transactionHash}-${log.logIndex}`,
+              type: "dex_swap" as const,
+              chain: "Sepolia" as const,
+              user: log.args.user as string,
+              note: formatSwapContent(
+                "Sepolia",
+                log.args.tokenIn as string,
+                log.args.amountIn as bigint,
+                log.args.tokenOut as string,
+                log.args.amountOut as bigint
+              ),
+              timestamp: Date.now(),
+              txHash: log.transactionHash ?? undefined,
+              blockNumber: Number(log.blockNumber),
+            })));
+          },
+        })
+      : () => {};
+
+    return () => {
+      cancelled = true;
+      unwatchHF();
+      unwatchLiquidated();
+      unwatchSepoliaSwap();
+    };
+  }, [mergeLogs, sepoliaClient]);
 
   function handleClear() {
     if (!vault) return;
@@ -268,6 +640,18 @@ function LogRow({ log }: { log: LogEntry }) {
     icon = "⏸";
     color = "text-orange-400";
     content = "策略已暂停";
+  } else if (log.type === "hf_update") {
+    icon = "!";
+    color = "text-cyan-300";
+    content = `[Sepolia] 健康度更新 ${log.note || ""}`;
+  } else if (log.type === "liquidated") {
+    icon = "✂";
+    color = "text-red-400";
+    content = `[Sepolia] 清算完成 ${log.note || ""} 抵押扣押 ${log.amount ? formatEther(log.amount).slice(0, 8) : "?"} ETH`;
+  } else if (log.type === "dex_swap") {
+    icon = "↔";
+    color = "text-indigo-300";
+    content = log.note || "Swap";
   }
 
   return (

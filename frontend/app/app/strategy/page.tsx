@@ -80,6 +80,7 @@ export default function StrategyPage() {
 
   const params = draftParams ?? chainParams;
   const hasRC = !!rcAddress && rcAddress !== "0x0000000000000000000000000000000000000000";
+  const liquidationOnly = params.enableLiquidation && !params.enableArbitrage;
 
   const contractParams = {
     healthFactorThreshold: BigInt(Math.round(parseFloat(params.healthFactorThreshold) * 1e18)),
@@ -179,6 +180,11 @@ export default function StrategyPage() {
                 </label>
               ))}
             </div>
+            {liquidationOnly && (
+              <p className="mt-4 text-xs text-cyan-300">
+                当前仅启用自动清算：事件源链在 Sepolia；套利已关闭，可随时重新开启。
+              </p>
+            )}
           </div>
 
           {/* 清算参数 */}

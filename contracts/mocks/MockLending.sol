@@ -68,8 +68,9 @@ contract MockLending {
         Position storage pos = positions[user];
         require(debtToCover <= pos.debt, "Debt to cover exceeds user debt");
 
-        // 计算可获得的抵押品（含奖励）
-        uint256 collateralValue = (debtToCover * 1e18) / ethPrice;
+        // debtToCover uses 6 decimals (USDC), while ethPrice uses 18 decimals.
+        // Scale debtToCover to 18 decimals before converting USD value into ETH collateral.
+        uint256 collateralValue = (debtToCover * 1e30) / ethPrice;
         uint256 collateralToSeize = (collateralValue * LIQUIDATION_BONUS) / 100;
 
         require(collateralToSeize <= pos.collateral, "Not enough collateral");

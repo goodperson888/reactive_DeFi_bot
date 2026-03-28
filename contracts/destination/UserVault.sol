@@ -5,6 +5,10 @@ import "../interfaces/ISwapRouter.sol";
 import "../interfaces/IWETH.sol";
 import "../interfaces/IERC20.sol";
 
+interface IPayable {
+    function debt(address contractAddress) external view returns (uint256);
+}
+
 /**
  * @title UserVault
  * @notice 用户资金管理合约，部署在 Destination 链（Base Sepolia）
@@ -256,6 +260,7 @@ contract UserVault {
      * @dev 当前采用链上模拟结算，便于 mock 模式下演示前端用户流闭环
      */
     function executeForUser(
+        address, /* rvmId */
         address user,
         string calldata strategyType,
         address, /* targetContract */
@@ -286,6 +291,17 @@ contract UserVault {
 
         _applyExecutionResult(user, strategyType, true, profit, 0);
         return true;
+    }
+
+    function pay(uint256 amount) external {
+        require(msg.sender == reactiveCallbackSender, "Authorized sender only");
+        _payReactiveDebt(payable(msg.sender), amount);
+    }
+
+    function coverDebt() external {
+        require(reactiveCallbackSender != address(0), "Callback sender not set");
+        uint256 amount = IPayable(reactiveCallbackSender).debt(address(this));
+        _payReactiveDebt(payable(reactiveCallbackSender), amount);
     }
 
     // ─── 真实协议执行（Uniswap V3）─────────────────────────────────────────
@@ -485,6 +501,13 @@ contract UserVault {
 
         pos.executionCount++;
         emit ExecutionResult(user, strategyType, success, profit, loss);
+    }
+
+    function _payReactiveDebt(address payable receiver, uint256 amount) internal {
+        if (amount == 0) return;
+        require(address(this).balance >= amount, "Insufficient funds");
+        (bool ok,) = receiver.call{value: amount}("");
+        require(ok, "Payment failed");
     }
 
     function _resolveStrategySimulation(

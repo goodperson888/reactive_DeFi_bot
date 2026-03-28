@@ -162,3 +162,58 @@ export const USER_VAULT_ABI = [
     inputs: [{ name: "user", type: "address", indexed: true }]
   },
 ] as const;
+
+export const MOCK_LENDING_ABI = [
+  {
+    name: "positions",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [
+      { name: "collateral", type: "uint256" },
+      { name: "debt", type: "uint256" },
+    ],
+  },
+  {
+    name: "getHealthFactor",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    name: "HealthFactorUpdated",
+    type: "event",
+    inputs: [
+      { name: "user", type: "address", indexed: true },
+      { name: "healthFactor", type: "uint256" },
+      { name: "totalCollateral", type: "uint256" },
+      { name: "totalDebt", type: "uint256" },
+    ],
+  },
+  {
+    name: "Liquidated",
+    type: "event",
+    inputs: [
+      { name: "user", type: "address", indexed: true },
+      { name: "liquidator", type: "address", indexed: true },
+      { name: "debtRepaid", type: "uint256" },
+      { name: "collateralSeized", type: "uint256" },
+    ],
+  },
+] as const;
+
+export const MOCK_DEX_ABI = [
+  {
+    name: "Swap",
+    type: "event",
+    inputs: [
+      { name: "user", type: "address", indexed: true },
+      { name: "tokenIn", type: "address", indexed: true },
+      { name: "tokenOut", type: "address", indexed: true },
+      { name: "amountIn", type: "uint256" },
+      { name: "amountOut", type: "uint256" },
+      { name: "newPrice", type: "uint256" },
+    ],
+  },
+] as const;

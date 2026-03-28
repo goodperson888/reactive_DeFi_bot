@@ -86,6 +86,8 @@ contract RCFactory {
             arbitrageTopic
         );
 
+        rc.coverDebt();
+
         userRC[user] = address(rc);
         allUsers.push(user);
         activeUserCount++;
@@ -156,6 +158,7 @@ contract RCFactory {
 
         (bool ok,) = payable(rcAddr).call{value: msg.value}("");
         require(ok, "Top up failed");
+        UserRC(payable(rcAddr)).coverDebt();
     }
 
     // ─── 查询 ──────────────────────────────────────────────────────────────────

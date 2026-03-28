@@ -1,0 +1,6 @@
+before {"executionCount":"0","balance":"10000000000000000","profit":"0","collateral":"50000000000000000","debt":"95000000","rcAddr":"0x448208daaE4799651B65a97A72B9b48b648C0D6a"}
+priceDropTx 0xe2c96de5ee0693fadafa445e8829c8e6869258fd23fc885bd667e5015068ba37
+hfAfter 1010526315789473684
+poll 1 {"liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","totalProfit":"0","balance":"10000000000000000"}
+poll 2 {"liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","totalProfit":"0","balance":"10000000000000000"}
+poll 3 {"liquidationTriggered":0,"callbacks":0,"executionResults":0,"executionCount":"0","totalProfit":"0","balance":"10000000000000000"}
