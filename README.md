@@ -1,5 +1,9 @@
 # Reactive DeFi Bot
 
+## 🚀 Final Submission
+- **Pitch Deck**: [Click here to view the Presentation](https://docs.google.com/presentation/d/1Z2960y5UPXV-wUjSvtjONmBxDOH8V4qN/edit?usp=sharing&ouid=115005173903147174630&rtpof=true&sd=true)
+- 
+---
 ## Demo Video (Watch First)
 ### https://drive.google.com/file/d/1MFKEIXMb1FmwmQwbT4pYfaBnVYZzWQQY/view?usp=drive_link
 
